@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -43,10 +44,22 @@ const (
 // Optional stsPlugin can be provided for token propagation to MCP tools; pass
 // nil if token propagation is not needed.
 func CreateGoogleADKAgent(ctx context.Context, agentConfig *adk.AgentConfig, agentName string, stsPlugin *sts.TokenPropagationPlugin, extraTools ...tool.Tool) (agent.Agent, error) {
-	return createGoogleADKAgent(ctx, agentConfig, agentName, stsPlugin, true, extraTools...)
+	scopes, err := materializeCLI(agentConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to materialize MCP CLI commands: %w", err)
+	}
+	if len(scopes.agents) > 0 && (stsPlugin != nil || strings.EqualFold(strings.TrimSpace(env.KagentPropagateToken.Get()), "true") || strings.TrimSpace(env.StsWellKnownURI.Get()) != "") {
+		return nil, errors.Join(errors.New("MCP CLI invocation-scoped authentication is pending CLI-3; retain native MCP presentation"), scopes.close())
+	}
+	root, err := createGoogleADKAgent(ctx, agentConfig, agentName, stsPlugin, true, scopes, extraTools...)
+	if err != nil {
+		return nil, errors.Join(err, scopes.close())
+	}
+	retainCLI(ctx, scopes)
+	return root, nil
 }
 
-func createGoogleADKAgent(ctx context.Context, agentConfig *adk.AgentConfig, agentName string, stsPlugin *sts.TokenPropagationPlugin, legacySkillsEnv bool, extraTools ...tool.Tool) (agent.Agent, error) {
+func createGoogleADKAgent(ctx context.Context, agentConfig *adk.AgentConfig, agentName string, stsPlugin *sts.TokenPropagationPlugin, legacySkillsEnv bool, scopes *cliScopes, extraTools ...tool.Tool) (agent.Agent, error) {
 	log := logging.FromContext(ctx)
 
 	if agentConfig == nil {
@@ -65,6 +78,7 @@ func createGoogleADKAgent(ctx context.Context, agentConfig *adk.AgentConfig, age
 			skillsDirectory = strings.TrimSpace(folder)
 		}
 	}
+	hasSkills := false
 	if skillsDirectory != "" {
 		skillsSource := skill.NewFileSystemSource(os.DirFS(skillsDirectory))
 		skills, err := skillsSource.ListFrontmatters(ctx)
@@ -72,19 +86,23 @@ func createGoogleADKAgent(ctx context.Context, agentConfig *adk.AgentConfig, age
 			return nil, fmt.Errorf("failed to load skills: %w", err)
 		}
 		if len(skills) > 0 {
-			executionTools, err := tools.NewSkillExecutionTools(skillsDirectory)
-			if err != nil {
-				return nil, fmt.Errorf("failed to create skill execution tools: %w", err)
-			}
-			extraTools = append(extraTools, executionTools...)
+			hasSkills = true
 
 			skillsToolset, err := skilltoolset.New(ctx, skilltoolset.Config{Source: skillsSource})
 			if err != nil {
 				return nil, fmt.Errorf("failed to create skill toolset: %w", err)
 			}
 			toolsets = append(toolsets, skillsToolset)
-			log.InfoContext(ctx, "wired local skills", "skills_directory", skillsDirectory, "skill_count", len(skills), "execution_tool_count", len(executionTools))
+			log.InfoContext(ctx, "wired local skills", "skills_directory", skillsDirectory, "skill_count", len(skills))
 		}
+	}
+	commandDirectory := scopes.agents[agentConfig]
+	if hasSkills || commandDirectory != "" {
+		executionTools, err := tools.NewExecutionTools(tools.ExecutionConfig{SkillsDirectory: skillsDirectory, CommandDirectory: commandDirectory})
+		if err != nil {
+			return nil, fmt.Errorf("failed to create execution tools: %w", err)
+		}
+		extraTools = append(extraTools, executionTools...)
 	}
 	mcpAppToolNames := mcp.MCPAppToolNamesFromToolsets(toolsets)
 
@@ -122,7 +140,7 @@ func createGoogleADKAgent(ctx context.Context, agentConfig *adk.AgentConfig, age
 	}
 	var subAgents []agent.Agent
 	for _, childConfig := range agentConfig.SubAgents {
-		child, err := createGoogleADKAgent(ctx, childConfig, childConfig.Name, stsPlugin, false)
+		child, err := createGoogleADKAgent(ctx, childConfig, childConfig.Name, stsPlugin, false, scopes)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create sub-agent %q: %w", childConfig.Name, err)
 		}
@@ -145,7 +163,7 @@ func createGoogleADKAgent(ctx context.Context, agentConfig *adk.AgentConfig, age
 	llmAgentConfig := llmagent.Config{
 		Name:                  agentName,
 		Description:           agentConfig.Description,
-		Instruction:           agentConfig.Instruction,
+		Instruction:           agentConfig.Instruction + cliDiscovery(agentConfig.CLITools),
 		Model:                 llmModel,
 		GenerateContentConfig: generateContentConfig(agentConfig.Model),
 		IncludeContents:       llmagent.IncludeContentsDefault,

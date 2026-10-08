@@ -31,6 +31,13 @@ RUN --mount=type=cache,target=/root/go/pkg/mod,rw             \
     echo "Building on $BUILDPLATFORM -> linux/$TARGETARCH" && \
     CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -ldflags "$LDFLAGS" -o /app "$BUILD_PACKAGE"
 
+RUN --mount=type=cache,target=/root/go/pkg/mod,rw \
+    --mount=type=cache,target=/root/.cache/go-build,rw \
+    mkdir -p /runtime-tools && \
+    if [ "$BUILD_PACKAGE" = "adk/cmd/main.go" ]; then \
+      CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -ldflags "$LDFLAGS" -o /runtime-tools/mcp-cli ./adk/cmd/mcp-cli; \
+    fi
+
 ### STAGE 2: final image
 FROM alpine:3.24
 ARG TARGETPLATFORM
@@ -41,6 +48,7 @@ RUN apk add --no-cache bash ca-certificates git && \
 
 WORKDIR /
 COPY --from=builder /app /app
+COPY --from=builder /runtime-tools/ /usr/local/bin/
 USER 65532:65532
 ARG VERSION
 

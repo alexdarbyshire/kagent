@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-type CommandExecutor struct{}
+type CommandExecutor struct{ commandDirectory string }
 
 // maxLineRunes is the longest line read_file and grep_file will emit before
 // truncating. Counted in runes, not bytes -- see truncateRunes.
@@ -110,6 +110,9 @@ func GetSessionPath(sessionID, skillsDirectory string) (string, error) {
 	}
 	if err := os.MkdirAll(filepath.Join(sessionPath, "outputs"), 0755); err != nil {
 		return "", fmt.Errorf("failed to create outputs directory: %w", err)
+	}
+	if skillsDirectory == "" {
+		return sessionPath, nil
 	}
 
 	absSkillsDir, err := filepath.Abs(skillsDirectory)
@@ -256,12 +259,12 @@ func ListDirContent(path string) (string, error) {
 	return strings.TrimSuffix(result.String(), "\n"), nil
 }
 
-func NewCommandExecutor() *CommandExecutor {
-	return &CommandExecutor{}
+func NewCommandExecutor(config ExecutionConfig) *CommandExecutor {
+	return &CommandExecutor{commandDirectory: config.CommandDirectory}
 }
 
 // ExecuteCommand executes a shell command.
-func (e *CommandExecutor) ExecuteCommand(ctx context.Context, command string, workingDir string) (string, error) {
+func (c *CommandExecutor) ExecuteCommand(ctx context.Context, command string, workingDir string) (string, error) {
 	timeout := 30 * time.Second
 	if strings.Contains(command, "python") {
 		timeout = 60 * time.Second
@@ -272,12 +275,20 @@ func (e *CommandExecutor) ExecuteCommand(ctx context.Context, command string, wo
 
 	cmd := exec.CommandContext(ctx, "bash", "-c", command)
 	cmd.Dir = workingDir
+	if c.commandDirectory != "" {
+		cmd.Env = append(cmd.Environ(), "PATH="+c.commandDirectory+string(os.PathListSeparator)+os.Getenv("PATH")) //nolint:forbidigo // Preserve inherited PATH only in this agent's subprocess environment.
+	}
+	cleanup := configureCommandProcess(ctx, cmd)
+	defer cleanup()
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
 	err := cmd.Run()
+	if ctx.Err() == context.Canceled {
+		return "", fmt.Errorf("command canceled: %w", ctx.Err())
+	}
 	if ctx.Err() == context.DeadlineExceeded {
 		return "", fmt.Errorf("command timed out after %v", timeout)
 	}

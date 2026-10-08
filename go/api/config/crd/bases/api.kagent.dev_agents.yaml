@@ -562,6 +562,11 @@ spec:
                           description: MCPToolBinding binds tools from a same-namespace
                             MCP server.
                           properties:
+                            exposeAsCLI:
+                              description: |-
+                                ExposeAsCLI presents this binding as a local command instead of native MCP
+                                tools. Requires an operator-registered CLI-enabled Go runtime image.
+                              type: boolean
                             requireApproval:
                               description: |-
                                 RequireApproval pauses before each invocation of a tool exposed by this

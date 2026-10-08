@@ -8,6 +8,10 @@ const (
 )
 
 var (
+	MCPCLIGoImages = RegisterStringVar(
+		"KAGENT_MCP_CLI_GO_IMAGES", "",
+		"Comma-separated exact digest-pinned image references built with the CLI-enabled kagent Go runtime. Empty disables MCP CLI preparation.", ComponentController,
+	)
 	AuthMode = RegisterStringVar(
 		"KAGENT_AUTH_MODE", AuthModeInsecure,
 		"Controller authentication mode: insecure or trusted-proxy. trusted-proxy requires an upstream credential-validating proxy and network isolation preventing bypass.", ComponentController,

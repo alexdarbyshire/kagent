@@ -155,7 +155,8 @@ func run(logger *slog.Logger, host, port, configDir string) error {
 		logger.Info("no session DB configured, using in-memory session")
 	}
 
-	ctx := logging.IntoContext(context.Background(), logger)
+	ctx, cancelRuntime := context.WithCancel(logging.IntoContext(context.Background(), logger))
+	defer cancelRuntime()
 
 	// Build memory service if configured.
 	var memoryService *kagentmemory.KagentMemoryService

@@ -176,7 +176,10 @@ jobs:
           # from the controller pod. Substrate rewrites registry pulls on workers.
           GUEST_DIGEST=$(docker buildx imagetools inspect "localhost:5001/kagent-dev/kagent/sandbox-guest:${VERSION}" | awk '$1 == "Digest:" { print $2 }')
           test -n "$GUEST_DIGEST"
-          export KAGENT_HELM_EXTRA_ARGS="${KAGENT_HELM_EXTRA_ARGS} --set-string controller.sandbox.guestImage.digest=${GUEST_DIGEST}"
+          RUNTIME_DIGEST=$(docker buildx imagetools inspect "localhost:5001/kagent-dev/kagent/golang-adk:${VERSION}" | awk '$1 == "Digest:" { print $2 }')
+          test -n "$RUNTIME_DIGEST"
+          CLI_RUNTIME_IMAGE="localhost:5001/kagent-dev/kagent/golang-adk@${RUNTIME_DIGEST}"
+          export KAGENT_HELM_EXTRA_ARGS="${KAGENT_HELM_EXTRA_ARGS} --set-string controller.sandbox.guestImage.digest=${GUEST_DIGEST} --set-string controller.env[0].name=KAGENT_MCP_CLI_GO_IMAGES --set-string controller.env[0].value=${CLI_RUNTIME_IMAGE}"
           make helm-install-provider
           kubectl rollout status deployment/kagent-controller -n kagent --timeout=120s
           kubectl wait --for=condition=Ready pod -l app.kubernetes.io/component=controller -n kagent --timeout=120s
