@@ -312,7 +312,11 @@ func agentConfigDestinations(cfg *adk.AgentConfig, modelConfig *v1alpha3.ModelCo
 		destinations = appendURLOrigin(destinations, tool.Params.Url)
 	}
 	for _, binding := range cfg.CLITools {
-		destinations = appendURLOrigin(destinations, binding.HTTP.Params.Url)
+		if binding.SSE != nil {
+			destinations = appendURLOrigin(destinations, binding.SSE.Params.Url)
+		} else {
+			destinations = appendURLOrigin(destinations, binding.HTTP.Params.Url)
+		}
 	}
 	for _, tool := range cfg.SseTools {
 		destinations = appendURLOrigin(destinations, tool.Params.Url)

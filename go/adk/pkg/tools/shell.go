@@ -13,7 +13,10 @@ import (
 	"time"
 )
 
-type CommandExecutor struct{ commandDirectory string }
+type CommandExecutor struct {
+	commandDirectory   string
+	prepareEnvironment func(context.Context, context.Context) ([]string, func(), error)
+}
 
 // maxLineRunes is the longest line read_file and grep_file will emit before
 // truncating. Counted in runes, not bytes -- see truncateRunes.
@@ -260,7 +263,7 @@ func ListDirContent(path string) (string, error) {
 }
 
 func NewCommandExecutor(config ExecutionConfig) *CommandExecutor {
-	return &CommandExecutor{commandDirectory: config.CommandDirectory}
+	return &CommandExecutor{commandDirectory: config.CommandDirectory, prepareEnvironment: config.PrepareEnvironment}
 }
 
 // ExecuteCommand executes a shell command.
@@ -270,6 +273,7 @@ func (c *CommandExecutor) ExecuteCommand(ctx context.Context, command string, wo
 		timeout = 60 * time.Second
 	}
 
+	invocation := ctx
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -277,6 +281,14 @@ func (c *CommandExecutor) ExecuteCommand(ctx context.Context, command string, wo
 	cmd.Dir = workingDir
 	if c.commandDirectory != "" {
 		cmd.Env = append(cmd.Environ(), "PATH="+c.commandDirectory+string(os.PathListSeparator)+os.Getenv("PATH")) //nolint:forbidigo // Preserve inherited PATH only in this agent's subprocess environment.
+	}
+	if c.prepareEnvironment != nil {
+		environment, release, err := c.prepareEnvironment(invocation, ctx)
+		if err != nil {
+			return "", fmt.Errorf("prepare command environment: %w", err)
+		}
+		defer release()
+		cmd.Env = append(cmd.Environ(), environment...)
 	}
 	cleanup := configureCommandProcess(ctx, cmd)
 	defer cleanup()

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 
 	"log/slog"
@@ -44,12 +45,10 @@ const (
 // Optional stsPlugin can be provided for token propagation to MCP tools; pass
 // nil if token propagation is not needed.
 func CreateGoogleADKAgent(ctx context.Context, agentConfig *adk.AgentConfig, agentName string, stsPlugin *sts.TokenPropagationPlugin, extraTools ...tool.Tool) (agent.Agent, error) {
-	scopes, err := materializeCLI(agentConfig)
+	propagateToken := strings.EqualFold(strings.TrimSpace(env.KagentPropagateToken.Get()), "true")
+	scopes, err := materializeCLI(agentConfig, propagateToken || stsPlugin != nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to materialize MCP CLI commands: %w", err)
-	}
-	if len(scopes.agents) > 0 && (stsPlugin != nil || strings.EqualFold(strings.TrimSpace(env.KagentPropagateToken.Get()), "true") || strings.TrimSpace(env.StsWellKnownURI.Get()) != "") {
-		return nil, errors.Join(errors.New("MCP CLI invocation-scoped authentication is pending CLI-3; retain native MCP presentation"), scopes.close())
 	}
 	root, err := createGoogleADKAgent(ctx, agentConfig, agentName, stsPlugin, true, scopes, extraTools...)
 	if err != nil {
@@ -98,7 +97,11 @@ func createGoogleADKAgent(ctx context.Context, agentConfig *adk.AgentConfig, age
 	}
 	commandDirectory := scopes.agents[agentConfig]
 	if hasSkills || commandDirectory != "" {
-		executionTools, err := tools.NewExecutionTools(tools.ExecutionConfig{SkillsDirectory: skillsDirectory, CommandDirectory: commandDirectory})
+		executionConfig := tools.ExecutionConfig{SkillsDirectory: skillsDirectory, CommandDirectory: commandDirectory}
+		if commandDirectory != "" {
+			executionConfig.PrepareEnvironment = mcp.PrepareCLIEnvironment(agentConfig.CLITools, propagateToken, dynamicHeaderProvider)
+		}
+		executionTools, err := tools.NewExecutionTools(executionConfig)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create execution tools: %w", err)
 		}
@@ -167,11 +170,13 @@ func createGoogleADKAgent(ctx context.Context, agentConfig *adk.AgentConfig, age
 		Model:                 llmModel,
 		GenerateContentConfig: generateContentConfig(agentConfig.Model),
 		IncludeContents:       llmagent.IncludeContentsDefault,
-		Tools:                 localTools,
-		Toolsets:              toolsets,
-		SubAgents:             subAgents,
-		BeforeToolCallbacks:   beforeToolCallbacks,
-		BeforeModelCallbacks:  beforeModelCallbacks,
+		// ADK appends invocation-specific toolset tools to this borrowed slice.
+		// Clip capacity so simultaneous callers cannot share its writable tail.
+		Tools:                slices.Clip(localTools),
+		Toolsets:             toolsets,
+		SubAgents:            subAgents,
+		BeforeToolCallbacks:  beforeToolCallbacks,
+		BeforeModelCallbacks: beforeModelCallbacks,
 		AfterToolCallbacks: []llmagent.AfterToolCallback{
 			makeAfterToolCallback(log),
 		},

@@ -3,10 +3,8 @@ package translator
 import (
 	"regexp"
 	"slices"
-	"strings"
 
 	"github.com/kagent-dev/kagent/go/api/adk"
-	"github.com/kagent-dev/kagent/go/core/pkg/env"
 )
 
 var cliImageReference = regexp.MustCompile(`^[^[:space:]@]+@sha256:[a-f0-9]{64}$`)
@@ -45,12 +43,6 @@ func ValidateCLIExposure(input *HarnessInput, registeredGoImages []string) error
 			}
 			if binding.Binding.RequireApproval {
 				return NewValidationError("MCP CLI binding %q does not support requireApproval: true; retain native MCP presentation", binding.Server.Name)
-			}
-			for _, variable := range input.Harness.Spec.Env {
-				if (variable.Name == env.KagentPropagateToken.Name() && strings.EqualFold(strings.TrimSpace(variable.Value), "true")) ||
-					(variable.Name == env.StsWellKnownURI.Name() && strings.TrimSpace(variable.Value) != "") {
-					return NewValidationError("MCP CLI binding %q does not support %s; invocation-scoped authentication is pending CLI-3", binding.Server.Name, variable.Name)
-				}
 			}
 			commands = append(commands, adk.MCPCLIConfig{Name: binding.Server.Name})
 		}

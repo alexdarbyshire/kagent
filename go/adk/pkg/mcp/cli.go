@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"mime"
 	"net/http"
 	"net/url"
@@ -47,60 +48,79 @@ func RunCLI(ctx context.Context, args []string, stdin io.Reader, stdout io.Write
 	if binding.Name == "" {
 		return errors.New("MCP binding requires a command name")
 	}
-	if binding.HTTP.RequireApproval {
+	if err := binding.ValidateTransport(); err != nil {
+		return err
+	}
+	params, selectedTools, requireApproval := cliConnection(binding)
+	if requireApproval {
 		return errors.New("MCP CLI does not support require_approval: true; retain native MCP exposure")
 	}
-	if len(binding.HTTP.AllowedHeaders) > 0 {
-		return errors.New("MCP CLI invocation header forwarding is unsupported")
-	}
-	p := binding.HTTP.Params
-	endpoint, err := url.Parse(p.Url)
-	if err != nil || (endpoint.Scheme != "http" && endpoint.Scheme != "https") || endpoint.Host == "" {
+	endpoint, err := url.Parse(params.URL)
+	if err != nil || (endpoint.Scheme != "http" && endpoint.Scheme != "https") || endpoint.Host == "" || endpoint.User != nil || endpoint.Fragment != "" {
 		return errors.New("MCP binding requires an HTTP endpoint")
 	}
-	if p.SseReadTimeout != nil {
+	if params.ServerType == "http" && params.SseReadTimeout != nil {
 		return errors.New("MCP CLI HTTP sse_read_timeout is unsupported")
 	}
-	if p.TerminateOnClose != nil && !*p.TerminateOnClose {
+	if binding.SSE == nil && binding.HTTP.Params.TerminateOnClose != nil && !*binding.HTTP.Params.TerminateOnClose {
 		return errors.New("MCP CLI requires terminate_on_close to close session resources")
 	}
-	if p.TLSDisableSystemCAs != nil && *p.TLSDisableSystemCAs && (p.TLSCACertPath == nil || *p.TLSCACertPath == "") {
+	if params.TLSDisableSystemCAs != nil && *params.TLSDisableSystemCAs && (params.TLSCACertPath == nil || *params.TLSCACertPath == "") {
 		return errors.New("tls_disable_system_cas requires tls_ca_cert_path")
 	}
+	if params.SseReadTimeout != nil && (*params.SseReadTimeout <= 0 || math.IsInf(*params.SseReadTimeout, 0) || math.IsNaN(*params.SseReadTimeout) || *params.SseReadTimeout >= float64(math.MaxInt64)/float64(time.Second)) {
+		return errors.New("MCP SSE read timeout must be positive and finite")
+	}
 	timeout := defaultTimeout
-	if p.Timeout != nil {
-		if *p.Timeout <= 0 {
+	if params.Timeout != nil {
+		if *params.Timeout <= 0 || math.IsInf(*params.Timeout, 0) || math.IsNaN(*params.Timeout) || *params.Timeout >= float64(math.MaxInt64)/float64(time.Second) {
 			return errors.New("MCP timeout must be positive")
 		}
-		timeout = time.Duration(*p.Timeout * float64(time.Second))
+		timeout = time.Duration(*params.Timeout * float64(time.Second))
+	}
+	if params.ServerType == "sse" && params.SseReadTimeout != nil {
+		// Native SSE keeps its GET alive for the larger configured timeout.
+		// The command budget must not cut that stream off earlier.
+		timeout = max(timeout, time.Duration(*params.SseReadTimeout*float64(time.Second)))
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	pool := &http.Transport{}
 	defer pool.CloseIdleConnections()
-	transport, err := createTransport(ctx, mcpServerParams{HTTPTransport: pool, URL: p.Url, ServerType: "http", Headers: p.Headers, Timeout: p.Timeout, TLSInsecureSkipVerify: p.TLSInsecureSkipVerify, TLSCACertPath: p.TLSCACertPath, TLSDisableSystemCAs: p.TLSDisableSystemCAs})
+	params.HTTPTransport = pool
+	transport, err := createTransport(ctx, params)
 	if err != nil {
 		return fmt.Errorf("failed to create MCP transport: %w", err)
 	}
-	httpTransport := transport.(*mcpsdk.StreamableClientTransport)
-	// This command must never resume or replay an ambiguous tool call.
-	httpTransport.MaxRetries = -1
-	httpTransport.DisableStandaloneSSE = true
-	httpTransport.HTTPClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	lifecycle := &cliHTTPTransport{base: httpTransport.HTTPClient.Transport}
-	httpTransport.HTTPClient.Transport = lifecycle
+	var httpClient *http.Client
+	switch remote := transport.(type) {
+	case *mcpsdk.StreamableClientTransport:
+		// This command must never resume or replay an ambiguous tool call.
+		remote.MaxRetries = -1
+		remote.DisableStandaloneSSE = true
+		httpClient = remote.HTTPClient
+	case *mcpsdk.SSEClientTransport:
+		httpClient = remote.HTTPClient
+	}
+	httpClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	invocation, err := cliInvocationTransport(httpClient.Transport, binding)
+	if err != nil {
+		return err
+	}
+	lifecycle := &cliHTTPTransport{base: invocation, endpoint: endpoint, legacySSE: binding.SSE != nil}
+	httpClient.Transport = lifecycle
 	client := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "kagent-mcp-cli", Version: "1"}, &mcpsdk.ClientOptions{Capabilities: &mcpsdk.ClientCapabilities{}, MultiRoundTrip: &mcpsdk.MultiRoundTripOptions{Disabled: true}})
 	session, err := client.Connect(ctx, transport, nil)
 	if err != nil {
-		return fmt.Errorf("failed to connect MCP command %s: %w", binding.Name, err)
+		return fmt.Errorf("failed to connect MCP command %s: %w", binding.Name, lifecycle.connectionError(err))
 	}
 	defer func() { err = errors.Join(err, session.Close()) }()
 	var tools []*mcpsdk.Tool
 	for tool, err := range session.Tools(ctx, nil) {
 		if err != nil {
-			return fmt.Errorf("failed to discover MCP tools: %w", err)
+			return fmt.Errorf("failed to discover MCP tools: %w", lifecycle.connectionError(err))
 		}
-		if len(binding.HTTP.Tools) == 0 || slices.Contains(binding.HTTP.Tools, tool.Name) {
+		if len(selectedTools) == 0 || slices.Contains(selectedTools, tool.Name) {
 			tools = append(tools, tool)
 		}
 	}
@@ -160,7 +180,7 @@ func RunCLI(ctx context.Context, args []string, stdin io.Reader, stdout io.Write
 	}
 	result, err := session.CallTool(ctx, &mcpsdk.CallToolParams{Name: selected.Name, Arguments: arguments})
 	if err != nil {
-		return fmt.Errorf("failed to call MCP %s %s (not retried): %w", binding.Name, selected.Name, err)
+		return fmt.Errorf("failed to call MCP %s %s (not retried): %w", binding.Name, selected.Name, lifecycle.connectionError(err))
 	}
 	resultData, err := lifecycle.resultJSON()
 	if err != nil {
@@ -188,6 +208,15 @@ func RunCLI(ctx context.Context, args []string, stdin io.Reader, stdout io.Write
 		return fmt.Errorf("MCP tool %s %s returned isError", binding.Name, selected.Name)
 	}
 	return nil
+}
+
+func cliConnection(binding cliBinding) (mcpServerParams, []string, bool) {
+	if binding.SSE != nil {
+		p := binding.SSE.Params
+		return mcpServerParams{URL: p.Url, ServerType: "sse", Headers: p.Headers, Timeout: p.Timeout, SseReadTimeout: p.SseReadTimeout, TLSInsecureSkipVerify: p.TLSInsecureSkipVerify, TLSCACertPath: p.TLSCACertPath, TLSDisableSystemCAs: p.TLSDisableSystemCAs}, binding.SSE.Tools, binding.SSE.RequireApproval
+	}
+	p := binding.HTTP.Params
+	return mcpServerParams{URL: p.Url, ServerType: "http", Headers: p.Headers, Timeout: p.Timeout, SseReadTimeout: p.SseReadTimeout, TLSInsecureSkipVerify: p.TLSInsecureSkipVerify, TLSCACertPath: p.TLSCACertPath, TLSDisableSystemCAs: p.TLSDisableSystemCAs}, binding.HTTP.Tools, binding.HTTP.RequireApproval
 }
 
 // This projection chooses ordinary flag types; the full raw schema validates
@@ -348,14 +377,25 @@ func (cliSchemaLoader) Load(location string) (any, error) {
 // cliHTTPTransport bounds command teardown without changing native MCP clients.
 type cliHTTPTransport struct {
 	base          http.RoundTripper
+	endpoint      *url.URL
+	legacySSE     bool
 	mu            sync.Mutex
 	resultBody    *cliResponseBody
 	catalogBodies []*cliResponseBody
+	streamBody    *cliResponseBody
+	resultID      json.RawMessage
+	catalogIDs    []json.RawMessage
+	transportErr  error
 }
 
 var _ http.RoundTripper = (*cliHTTPTransport)(nil)
 
 func (c *cliHTTPTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	if c.legacySSE && (request.URL.Scheme != c.endpoint.Scheme || !strings.EqualFold(request.URL.Host, c.endpoint.Host) || request.URL.User != nil) {
+		err := errors.New("MCP SSE message endpoint changed configured origin")
+		c.recordError(err)
+		return nil, err
+	}
 	var call struct {
 		Method string          `json:"method"`
 		ID     json.RawMessage `json:"id"`
@@ -376,6 +416,18 @@ func (c *cliHTTPTransport) RoundTrip(request *http.Request) (*http.Response, err
 		request = request.Clone(request.Context())
 		request.GetBody = nil
 	}
+	// Legacy SSE responses arrive on the GET stream and can precede the POST
+	// acknowledgement. Register their request IDs before dispatch.
+	if c.legacySSE {
+		c.mu.Lock()
+		switch call.Method {
+		case "tools/call":
+			c.resultID = bytes.Clone(call.ID)
+		case "tools/list":
+			c.catalogIDs = append(c.catalogIDs, bytes.Clone(call.ID))
+		}
+		c.mu.Unlock()
+	}
 	if request.Method == http.MethodDelete {
 		ctx, cancel := context.WithTimeout(request.Context(), time.Second)
 		defer cancel()
@@ -383,9 +435,16 @@ func (c *cliHTTPTransport) RoundTrip(request *http.Request) (*http.Response, err
 	}
 	response, err := c.base.RoundTrip(request)
 	if err != nil {
+		c.recordError(err)
 		return nil, err
 	}
-	if call.Method == "tools/call" || call.Method == "tools/list" {
+	if c.legacySSE && request.Method == http.MethodGet {
+		body := &cliResponseBody{ReadCloser: response.Body, contentType: response.Header.Get("Content-Type")}
+		response.Body = body
+		c.mu.Lock()
+		c.streamBody = body
+		c.mu.Unlock()
+	} else if !c.legacySSE && (call.Method == "tools/call" || call.Method == "tools/list") {
 		body := &cliResponseBody{ReadCloser: response.Body, requestID: call.ID, contentType: response.Header.Get("Content-Type")}
 		response.Body = body
 		c.mu.Lock()
@@ -397,6 +456,22 @@ func (c *cliHTTPTransport) RoundTrip(request *http.Request) (*http.Response, err
 		c.mu.Unlock()
 	}
 	return response, nil
+}
+
+// The SDK may close SSE after a failed write and surface EOF instead of the
+// write error. Retain its cause, including origin or invocation lookup failures.
+func (c *cliHTTPTransport) connectionError(err error) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return errors.Join(err, c.transportErr)
+}
+
+func (c *cliHTTPTransport) recordError(err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.transportErr == nil {
+		c.transportErr = err
+	}
 }
 
 // Capture HTTP response bytes before the SDK decodes generic result fields
@@ -422,14 +497,25 @@ func (c *cliResponseBody) Read(destination []byte) (int, error) {
 func (c *cliHTTPTransport) resultJSON() (json.RawMessage, error) {
 	c.mu.Lock()
 	body := c.resultBody
+	if c.legacySSE {
+		body = c.streamBody
+	}
+	requestID := bytes.Clone(c.resultID)
 	c.mu.Unlock()
 	if body == nil {
 		return nil, errors.New("MCP tool response was not captured")
+	}
+	if c.legacySSE {
+		return body.resultForID(requestID)
 	}
 	return body.resultJSON()
 }
 
 func (c *cliResponseBody) resultJSON() (json.RawMessage, error) {
+	return c.resultForID(c.requestID)
+}
+
+func (c *cliResponseBody) resultForID(requestID json.RawMessage) (json.RawMessage, error) {
 	c.mu.Lock()
 	data := bytes.Clone(c.data.Bytes())
 	c.mu.Unlock()
@@ -438,7 +524,7 @@ func (c *cliResponseBody) resultJSON() (json.RawMessage, error) {
 		return nil, err
 	}
 	if mediaType == "application/json" {
-		return resultEnvelope(data, c.requestID)
+		return resultEnvelope(data, requestID)
 	}
 	if mediaType != "text/event-stream" {
 		return nil, fmt.Errorf("unsupported MCP response content type %q", mediaType)
@@ -451,7 +537,7 @@ func (c *cliResponseBody) resultJSON() (json.RawMessage, error) {
 	for line := range strings.SplitSeq(normalized, "\n") {
 		if line == "" {
 			if event.Len() > 0 && (eventName == "" || eventName == "message") {
-				if result, err := resultEnvelope([]byte(event.String()), c.requestID); err == nil {
+				if result, err := resultEnvelope([]byte(event.String()), requestID); err == nil {
 					return result, nil
 				}
 			}
@@ -469,7 +555,7 @@ func (c *cliResponseBody) resultJSON() (json.RawMessage, error) {
 		}
 	}
 	if event.Len() > 0 && (eventName == "" || eventName == "message") {
-		if result, err := resultEnvelope([]byte(event.String()), c.requestID); err == nil {
+		if result, err := resultEnvelope([]byte(event.String()), requestID); err == nil {
 			return result, nil
 		}
 	}
@@ -500,14 +586,11 @@ func resultEnvelope(data, requestID []byte) (json.RawMessage, error) {
 }
 
 func (c *cliHTTPTransport) schemaJSON(name string) (json.RawMessage, error) {
-	c.mu.Lock()
-	catalogs := slices.Clone(c.catalogBodies)
-	c.mu.Unlock()
-	for _, body := range catalogs {
-		data, err := body.resultJSON()
-		if err != nil {
-			return nil, err
-		}
+	catalogs, err := c.catalogJSON()
+	if err != nil {
+		return nil, err
+	}
+	for _, data := range catalogs {
 		var catalog struct {
 			Tools []struct {
 				Name        string          `json:"name"`
@@ -524,6 +607,36 @@ func (c *cliHTTPTransport) schemaJSON(name string) (json.RawMessage, error) {
 		}
 	}
 	return nil, fmt.Errorf("original schema for tool %q was not captured", name)
+}
+
+func (c *cliHTTPTransport) catalogJSON() ([]json.RawMessage, error) {
+	c.mu.Lock()
+	catalogs := slices.Clone(c.catalogBodies)
+	stream := c.streamBody
+	identifiers := slices.Clone(c.catalogIDs)
+	c.mu.Unlock()
+	var results []json.RawMessage
+	if c.legacySSE {
+		if stream == nil {
+			return nil, errors.New("MCP SSE catalog stream was not captured")
+		}
+		for _, id := range identifiers {
+			data, err := stream.resultForID(id)
+			if err != nil {
+				return nil, err
+			}
+			results = append(results, data)
+		}
+		return results, nil
+	}
+	for _, body := range catalogs {
+		data, err := body.resultJSON()
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, data)
+	}
+	return results, nil
 }
 
 func readCLIFile(ctx context.Context, path string) ([]byte, error) {

@@ -34,6 +34,10 @@ type MCPCLIConfig struct {
 	Name        string              `json:"name"`
 	Description string              `json:"description,omitempty"`
 	HTTP        HttpMcpServerConfig `json:"http"`
+	SSE         *SseMcpServerConfig `json:"sse,omitempty"`
+	// RequiresInvocationHeaders is set only in the runtime's private binding
+	// file when invocation-scoped authentication must be obtained from its parent.
+	RequiresInvocationHeaders bool `json:"requires_invocation_headers,omitempty"`
 }
 
 type SseConnectionParams struct {
