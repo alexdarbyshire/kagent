@@ -54,11 +54,6 @@ func CreateRunnerConfig(
 		return runner.Config{}, err
 	}
 
-	adkAgent, err := agent.CreateGoogleADKAgent(ctx, agentConfig, agentNameFromAppName(appName), stsPlugin, extraTools...)
-	if err != nil {
-		return runner.Config{}, fmt.Errorf("failed to create agent: %w", err)
-	}
-
 	// Context compaction is a runner concern: the runner summarizes older
 	// session events on the strategies the agent configures. Nil keeps the
 	// runner exactly as it is without the feature.
@@ -90,6 +85,12 @@ func CreateRunnerConfig(
 		if p != nil {
 			adkPlugins = append(adkPlugins, p)
 		}
+	}
+	// Complete fallible runner setup before agent construction materializes
+	// runtime-owned command directories.
+	adkAgent, err := agent.CreateGoogleADKAgent(ctx, agentConfig, agentNameFromAppName(appName), stsPlugin, extraTools...)
+	if err != nil {
+		return runner.Config{}, fmt.Errorf("failed to create agent: %w", err)
 	}
 
 	cfg := runner.Config{

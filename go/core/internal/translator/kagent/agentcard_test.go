@@ -13,7 +13,7 @@ import (
 )
 
 func TestCompilerRequiresModelConfig(t *testing.T) {
-	_, err := NewCompiler(krt.TestingDummyContext{}, v2translator.Collections{}).Compile(context.Background(), &v2translator.HarnessInput{
+	_, err := NewCompiler(krt.TestingDummyContext{}, v2translator.Collections{}, nil).Compile(context.Background(), &v2translator.HarnessInput{
 		Harness: &v2translator.HarnessConfiguration{Spec: v1alpha3.HarnessSpec{Kagent: &v1alpha3.KagentHarness{}}},
 		Root:    &v2translator.AgentInput{Template: &v2translator.TemplateConfiguration{}},
 	})

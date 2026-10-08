@@ -79,6 +79,91 @@ spec:
 Command and argument changes participate in revision identity. They affect newly
 prepared revisions, not existing Sessions pinned to an older revision.
 
+### MCP commands in the Go runtime
+
+An AgentTemplate can present an MCP binding as a local command instead of native
+model tools by setting `tools[].mcp.exposeAsCLI: true`. The same field is available
+in an Agent's inline `spec.template`. Omitted or false retains native MCP
+presentation; different bindings can use different presentations.
+
+```yaml
+tools:
+  - mcp:
+      server:
+        kind: RemoteMCPServer
+        name: browser
+      tools: [navigate]
+      exposeAsCLI: true
+```
+
+The operator must build the CLI-enabled Go ADK image and register its exact
+digest-pinned reference in controller setting `KAGENT_MCP_CLI_GO_IMAGES`.
+The setting is a comma-separated list and defaults to empty, which disables CLI
+preparation. Helm accepts it through `controller.env`:
+
+```yaml
+controller:
+  env:
+    - name: KAGENT_MCP_CLI_GO_IMAGES
+      value: "registry.example/kagent/go-adk@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+```
+
+Replace the example with the digest of the image actually built with the bridge,
+and use the identical reference in `Harness.spec.workload.image`. Registration is
+an operator assertion about that image; the controller does not infer support
+from repository names or Harness status. CLI-enabled Harnesses select `kagent`,
+retain the image entrypoint or set `command: ["/app"]`, and can retain existing
+Go runtime arguments. Python kagent, Codex, Claude, BYO, unregistered images, and
+other entrypoint overrides fail preparation explicitly.
+
+Each binding uses the RemoteMCPServer's name as its executable command:
+
+```sh
+browser --help
+browser navigate --help
+browser navigate --input-file arguments.json
+cat arguments.json | browser navigate --input-file -
+```
+
+Ordinary arguments use exact schema property names as `--name value` or
+`--name=value`. JSON file/stdin input supports nested data, explicit null, and
+schema properties that collide with reserved help/input flags; do not combine
+JSON input with ordinary flags. Empty or omitted `tools` exposes all endpoint
+tools. Help and invocation respect a nonempty selection. A JSON argument file
+supplies values; reading it does not upload the file itself.
+
+The Go image packages the bridge, and startup creates private binding files and
+real executable launchers for each root or Shared agent. Bash receives only that
+agent's command directory in its subprocess PATH; the process-global PATH remains
+unchanged. Skills and CLI bindings reuse one set of Bash/file execution tools,
+including when no skills are configured. Initial discovery contains command names,
+purposes, and help guidance; tool schemas are discovered on demand. Root and
+Shared agents can use the same command name with independent selections. Duplicate
+commands in one agent and names that shadow shipped platform commands or Bash
+builtins, such as `grep`, `test`, or `true`, fail preparation. Rename the referenced
+RemoteMCPServer or retain native MCP presentation in those cases.
+
+CLI bindings currently support Streamable HTTP, configured endpoint paths, static
+or Secret-backed headers, positive timeouts, and supported TLS verification
+settings. Secret-backed headers retain destination-scoped Substrate credential
+injection and CLI endpoints remain in the compiled egress allowlist. SSE,
+`sseReadTimeout`, `terminateOnClose: false`, caller-token propagation, and STS
+dynamic headers fail explicitly until their invocation handoff is supported.
+Native MCP retains its existing connection and authentication paths.
+
+`requireApproval: true` with CLI exposure fails preparation, including Shared
+children. Protected bindings retain native presentation to use human approval.
+Command visibility and tool filtering are presentation controls; authorization
+remains with the configured server/gateway and runtime controls.
+
+Results use the MCP JSON result envelope on stdout. Tool errors retain their JSON
+envelope and exit nonzero; input/protocol failures produce stderr diagnostics and
+exit nonzero. Calls are not automatically replayed. Bash cancellation stops its
+subprocess group, including scripts and bridge descendants. Runtime shutdown
+removes command directories, and failed startup removes the partial command tree.
+Compiled CLI bindings participate in immutable prepared revisions and are
+materialized from the selected runtime inputs at startup.
+
 ## Prepared revision pipeline
 
 The controller compiles each Agent through one pipeline:

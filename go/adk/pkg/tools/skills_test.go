@@ -159,7 +159,7 @@ func TestResolvePathContainment(t *testing.T) {
 	}
 }
 
-func TestNewSkillExecutionTools_ReturnsExpectedToolSet(t *testing.T) {
+func TestNewExecutionTools_ReturnsExpectedToolSet(t *testing.T) {
 	skillsDir := t.TempDir()
 	t.Setenv("KAGENT_ENABLE_FILE_SEARCH_TOOLS", "true")
 	skillDir := filepath.Join(skillsDir, "demo")
@@ -174,9 +174,9 @@ description: Demo skill.
 		t.Fatalf("failed to write skill metadata: %v", err)
 	}
 
-	tools, err := NewSkillExecutionTools(skillsDir)
+	tools, err := NewExecutionTools(ExecutionConfig{SkillsDirectory: skillsDir})
 	if err != nil {
-		t.Fatalf("NewSkillExecutionTools() error = %v", err)
+		t.Fatalf("NewExecutionTools() error = %v", err)
 	}
 
 	got := map[string]bool{}
@@ -191,13 +191,13 @@ description: Demo skill.
 	}
 }
 
-func TestNewSkillExecutionTools_OmitsListFilesAndGrepFileByDefault(t *testing.T) {
+func TestNewExecutionTools_OmitsListFilesAndGrepFileByDefault(t *testing.T) {
 	skillsDir := t.TempDir()
 	t.Setenv("KAGENT_ENABLE_FILE_SEARCH_TOOLS", "")
 
-	tools, err := NewSkillExecutionTools(skillsDir)
+	tools, err := NewExecutionTools(ExecutionConfig{SkillsDirectory: skillsDir})
 	if err != nil {
-		t.Fatalf("NewSkillExecutionTools() error = %v, want nil (list_files/grep_file should be omitted, not fatal)", err)
+		t.Fatalf("NewExecutionTools() error = %v, want nil (list_files/grep_file should be omitted, not fatal)", err)
 	}
 
 	got := map[string]bool{}
@@ -218,7 +218,7 @@ func TestNewSkillExecutionTools_OmitsListFilesAndGrepFileByDefault(t *testing.T)
 	}
 }
 
-func TestNewSkillExecutionTools_BashDescriptionMentionsFileSearchToolsOnlyWhenEnabled(t *testing.T) {
+func TestNewExecutionTools_BashDescriptionMentionsFileSearchToolsOnlyWhenEnabled(t *testing.T) {
 	skillsDir := t.TempDir()
 
 	findBash := func(t *testing.T, tools []tool.Tool) tool.Tool {
@@ -234,9 +234,9 @@ func TestNewSkillExecutionTools_BashDescriptionMentionsFileSearchToolsOnlyWhenEn
 
 	t.Run("disabled by default", func(t *testing.T) {
 		t.Setenv("KAGENT_ENABLE_FILE_SEARCH_TOOLS", "")
-		tools, err := NewSkillExecutionTools(skillsDir)
+		tools, err := NewExecutionTools(ExecutionConfig{SkillsDirectory: skillsDir})
 		if err != nil {
-			t.Fatalf("NewSkillExecutionTools() error = %v", err)
+			t.Fatalf("NewExecutionTools() error = %v", err)
 		}
 		desc := findBash(t, tools).Description()
 		if strings.Contains(desc, "list_files") || strings.Contains(desc, "grep_file") {
@@ -246,9 +246,9 @@ func TestNewSkillExecutionTools_BashDescriptionMentionsFileSearchToolsOnlyWhenEn
 
 	t.Run("mentioned when enabled", func(t *testing.T) {
 		t.Setenv("KAGENT_ENABLE_FILE_SEARCH_TOOLS", "true")
-		tools, err := NewSkillExecutionTools(skillsDir)
+		tools, err := NewExecutionTools(ExecutionConfig{SkillsDirectory: skillsDir})
 		if err != nil {
-			t.Fatalf("NewSkillExecutionTools() error = %v", err)
+			t.Fatalf("NewExecutionTools() error = %v", err)
 		}
 		desc := findBash(t, tools).Description()
 		if !strings.Contains(desc, "list_files and grep_file") {
@@ -260,16 +260,16 @@ func TestNewSkillExecutionTools_BashDescriptionMentionsFileSearchToolsOnlyWhenEn
 // TestListFilesAndGrepFileTools_RunThroughADK invokes the real functiontool.Run()
 // path (the same one the ADK flow engine uses to execute a model's tool call),
 // rather than calling ListDirContent/GrepContent directly, to verify the
-// closures in NewSkillExecutionTools correctly wire path resolution and
+// closures in NewExecutionTools correctly wire path resolution and
 // argument parsing end-to-end.
 func TestListFilesAndGrepFileTools_RunThroughADK(t *testing.T) {
 	t.Setenv("TMPDIR", t.TempDir())
 	skillsDir := t.TempDir()
 	t.Setenv("KAGENT_ENABLE_FILE_SEARCH_TOOLS", "true")
 
-	tools, err := NewSkillExecutionTools(skillsDir)
+	tools, err := NewExecutionTools(ExecutionConfig{SkillsDirectory: skillsDir})
 	if err != nil {
-		t.Fatalf("NewSkillExecutionTools() error = %v", err)
+		t.Fatalf("NewExecutionTools() error = %v", err)
 	}
 
 	var listFilesTool, grepFileTool, readFileTool, bashTool tool.Tool

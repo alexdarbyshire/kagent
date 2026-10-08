@@ -121,7 +121,11 @@ func (c *Builder) compileAgent(ctx context.Context, input *v2translator.AgentInp
 		}
 		server := tool.Server.DeepCopy()
 		server.Spec.HeadersFrom = nil
-		if err := c.addRemoteMCPServer(cfg, server, tool.Binding.Tools, tool.Binding.RequireApproval, headers); err != nil {
+		if tool.Binding.ExposeAsCLI != nil && *tool.Binding.ExposeAsCLI {
+			if err := c.addCLI(cfg, server, tool.Binding, headers); err != nil {
+				return nil, err
+			}
+		} else if err := c.addRemoteMCPServer(cfg, server, tool.Binding.Tools, tool.Binding.RequireApproval, headers); err != nil {
 			return nil, fmt.Errorf("compile %s %q: %w", tool.Binding.Server.Kind, tool.Binding.Server.Name, err)
 		}
 		modelRuntime.Environment = append(modelRuntime.Environment, credentialEnv...)
@@ -306,6 +310,9 @@ func agentConfigDestinations(cfg *adk.AgentConfig, modelConfig *v1alpha3.ModelCo
 	destinations := make([]string, 0, len(cfg.HttpTools)+len(cfg.SseTools)+1)
 	for _, tool := range cfg.HttpTools {
 		destinations = appendURLOrigin(destinations, tool.Params.Url)
+	}
+	for _, binding := range cfg.CLITools {
+		destinations = appendURLOrigin(destinations, binding.HTTP.Params.Url)
 	}
 	for _, tool := range cfg.SseTools {
 		destinations = appendURLOrigin(destinations, tool.Params.Url)

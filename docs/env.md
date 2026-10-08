@@ -116,6 +116,7 @@ This reference covers user-configurable settings for the controller, CLI, standa
 | `KAGENT_HTTP_BIND_ADDRESS` | String | `:8083` | Listen address for the controller HTTP, gRPC, A2A, and MCP server. |
 | `KAGENT_LEADER_ELECT` | Boolean | `true` | Enable controller leader election, including during single-replica rolling updates. Required for sandbox lifecycle coordination. |
 | `KAGENT_LOG_LEVEL` | String | `info` | Logging level for the controller, CLI, and Go/Python runtimes, including the Python ADK HTTP server: debug, info, warn, or error. Python also accepts standard Python logging levels. |
+| `KAGENT_MCP_CLI_GO_IMAGES` | String | `(none)` | Comma-separated exact digest-pinned image references built with the CLI-enabled kagent Go runtime. Empty disables MCP CLI preparation. |
 | `KAGENT_METRICS_BIND_ADDRESS` | String | `0` | Address the controller-runtime metrics server binds to, e.g. :8080. "0" (the default) serves no metrics, so an installation that does not set this is unchanged. The Helm chart renders this variable, and its ServiceMonitor, from controller.metrics. |
 | `KAGENT_METRICS_SECURE` | Boolean | `false` | Serve the metrics endpoint over HTTPS with authentication and authorization. A scraper then needs a token bound to the metrics-reader ClusterRole. |
 | `KAGENT_NAMESPACE` | String | `kagent` | Kubernetes namespace where kagent resources are deployed. The controller injects the agent namespace into runtimes; Python runtimes require it. |

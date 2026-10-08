@@ -552,7 +552,7 @@ func TestExecuteCommand(t *testing.T) {
 	defer os.RemoveAll(tmpDir)
 
 	ctx := context.Background()
-	executor := NewCommandExecutor()
+	executor := NewCommandExecutor(ExecutionConfig{})
 
 	tests := []struct {
 		name       string
@@ -663,7 +663,7 @@ func TestExecuteCommand_Timeout(t *testing.T) {
 	defer os.RemoveAll(tmpDir)
 
 	ctx := context.Background()
-	executor := NewCommandExecutor()
+	executor := NewCommandExecutor(ExecutionConfig{})
 
 	// Test timeout for long-running command
 	// The timeout is 30 seconds for non-python commands

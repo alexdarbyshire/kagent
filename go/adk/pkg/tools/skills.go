@@ -129,23 +129,33 @@ type grepFileInput struct {
 	IgnoreCase bool   `json:"ignore_case,omitempty"`
 }
 
-// NewSkillExecutionTools creates the filesystem and shell tools used to execute
-// skills. Skill discovery and loading are provided by Go ADK's skilltoolset.
-func NewSkillExecutionTools(skillsDirectory string) ([]tool.Tool, error) {
-	skillsDirectory = strings.TrimSpace(skillsDirectory)
-	if skillsDirectory == "" {
+// ExecutionConfig scopes local execution to one agent's skills and MCP commands.
+type ExecutionConfig struct {
+	SkillsDirectory  string
+	CommandDirectory string
+}
+
+// NewExecutionTools creates the existing filesystem and Bash tools when skills
+// or MCP commands need local execution. Skills are discovered by ADK's toolset.
+func NewExecutionTools(config ExecutionConfig) ([]tool.Tool, error) {
+	skillsDirectory := strings.TrimSpace(config.SkillsDirectory)
+	if skillsDirectory == "" && config.CommandDirectory == "" {
 		return nil, nil
 	}
 
-	absSkillsDir, err := filepath.Abs(skillsDirectory)
-	if err != nil {
-		return nil, fmt.Errorf("failed to resolve skills directory %q: %w", skillsDirectory, err)
-	}
-	if _, err := os.Stat(absSkillsDir); err != nil {
-		return nil, fmt.Errorf("failed to access skills directory %q: %w", absSkillsDir, err)
+	absSkillsDir := ""
+	if skillsDirectory != "" {
+		var err error
+		absSkillsDir, err = filepath.Abs(skillsDirectory)
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve skills directory %q: %w", skillsDirectory, err)
+		}
+		if _, err := os.Stat(absSkillsDir); err != nil {
+			return nil, fmt.Errorf("failed to access skills directory %q: %w", absSkillsDir, err)
+		}
 	}
 
-	commandExecutor := NewCommandExecutor()
+	commandExecutor := NewCommandExecutor(config)
 
 	readFileTool, err := functiontool.New(functiontool.Config{
 		Name:        "read_file",
@@ -359,7 +369,7 @@ func resolveSandboxedPath(sessionID, skillsDirectory, requestedPath string, poli
 	}
 	roots := []string{sessionRoot}
 
-	if policy.allowSkillsRoot {
+	if policy.allowSkillsRoot && skillsDirectory != "" {
 		// Resolved eagerly rather than only when the session root misses, so
 		// an unresolvable skills directory still surfaces as an error the way
 		// it did before these three were merged into one function.

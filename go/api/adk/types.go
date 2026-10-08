@@ -28,6 +28,14 @@ type HttpMcpServerConfig struct {
 	RequireApproval bool                           `json:"require_approval,omitempty"`
 }
 
+// MCPCLIConfig is a private, named command binding consumed by the Go runtime
+// and bridge. It preserves the bridge's HTTP input contract.
+type MCPCLIConfig struct {
+	Name        string              `json:"name"`
+	Description string              `json:"description,omitempty"`
+	HTTP        HttpMcpServerConfig `json:"http"`
+}
+
 type SseConnectionParams struct {
 	Url            string            `json:"url"`
 	Headers        map[string]string `json:"headers"`
@@ -684,6 +692,7 @@ type AgentConfig struct {
 	Description     string                 `json:"description"`
 	Instruction     string                 `json:"instruction"`
 	HttpTools       []HttpMcpServerConfig  `json:"http_tools,omitempty"`
+	CLITools        []MCPCLIConfig         `json:"cli_tools,omitempty"`
 	SseTools        []SseMcpServerConfig   `json:"sse_tools,omitempty"`
 	StdioTools      []StdioMcpServerConfig `json:"stdio_tools,omitempty"`
 	RemoteAgents    []RemoteAgentConfig    `json:"remote_agents,omitempty"`

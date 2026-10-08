@@ -23,10 +23,7 @@ import (
 )
 
 // cliBinding is a private runtime input, not a model-authored connection API.
-type cliBinding struct {
-	Name string                  `json:"name"`
-	HTTP adk.HttpMcpServerConfig `json:"http"`
-}
+type cliBinding = adk.MCPCLIConfig
 
 // RunCLI executes the MCP command interface using a private binding file.
 // The executable owns signal handling and stderr diagnostics.

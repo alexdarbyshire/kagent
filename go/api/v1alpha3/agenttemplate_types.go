@@ -58,6 +58,10 @@ type MCPToolBinding struct {
 	// +listType=set
 	// +optional
 	Tools []string `json:"tools,omitempty"`
+	// ExposeAsCLI presents this binding as a local command instead of native MCP
+	// tools. Requires an operator-registered CLI-enabled Go runtime image.
+	// +optional
+	ExposeAsCLI *bool `json:"exposeAsCLI,omitempty"`
 	// RequireApproval pauses before each invocation of a tool exposed by this
 	// binding. It applies to the selected tools, or to every server tool when
 	// Tools is omitted or empty.
