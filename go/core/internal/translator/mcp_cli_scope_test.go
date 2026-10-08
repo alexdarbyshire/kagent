@@ -24,6 +24,7 @@ import (
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	adkrunner "google.golang.org/adk/v2/runner"
 )
 
 func TestMCPCLIRuntimeScopesRootAndSharedCommands(t *testing.T) {
@@ -74,7 +75,7 @@ func TestMCPCLIRuntimeScopesRootAndSharedCommands(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		if counter.Add(1) == 1 {
+		if counter.Add(1)%2 == 1 {
 			args, _ := json.Marshal(struct {
 				Command string `json:"command"`
 			}{"command -v browser; browser " + scope + "_record --text " + scope})
@@ -108,24 +109,28 @@ func TestMCPCLIRuntimeScopesRootAndSharedCommands(t *testing.T) {
 	runnerConfig, err := runtimeRunner.CreateRunnerConfig(ctx, root, nil, "scoped", nil, nil)
 	require.NoError(t, err)
 	require.Equal(t, originalPATH, os.Getenv("PATH"), "materialization must not mutate process PATH")
-	for _, scope := range []string{"root", "child"} {
-		selected := runnerConfig
-		if scope == "child" {
-			selected.Agent = runnerConfig.Agent.SubAgents()[0]
-		}
-		executor, err := runtimea2a.NewKAgentExecutor(runtimea2a.KAgentExecutorConfig{RunnerConfig: selected, AppName: "scoped", Logger: slog.New(slog.DiscardHandler)})
-		require.NoError(t, err)
-		message := a2atype.NewMessage(a2atype.MessageRoleUser, a2atype.NewTextPart("record "+scope))
-		message.ContextID = scope + "-session"
-		completed := false
-		for event, err := range executor.Execute(ctx, &a2asrv.ExecutorContext{TaskID: a2atype.NewTaskID(), ContextID: message.ContextID, Message: message}) {
-			require.NoError(t, err)
-			if update, ok := event.(*a2atype.TaskStatusUpdateEvent); ok && update.Status.State == a2atype.TaskStateCompleted {
-				completed = true
+	executeScopes := func(ctx context.Context, config adkrunner.Config, appName string) {
+		t.Helper()
+		for _, scope := range []string{"root", "child"} {
+			selected := config
+			if scope == "child" {
+				selected.Agent = config.Agent.SubAgents()[0]
 			}
+			executor, err := runtimea2a.NewKAgentExecutor(runtimea2a.KAgentExecutorConfig{RunnerConfig: selected, AppName: appName, Logger: slog.New(slog.DiscardHandler)})
+			require.NoError(t, err)
+			message := a2atype.NewMessage(a2atype.MessageRoleUser, a2atype.NewTextPart("record "+scope))
+			message.ContextID = scope + "-" + appName
+			completed := false
+			for event, err := range executor.Execute(ctx, &a2asrv.ExecutorContext{TaskID: a2atype.NewTaskID(), ContextID: message.ContextID, Message: message}) {
+				require.NoError(t, err)
+				if update, ok := event.(*a2atype.TaskStatusUpdateEvent); ok && update.Status.State == a2atype.TaskStateCompleted {
+					completed = true
+				}
+			}
+			require.True(t, completed)
 		}
-		require.True(t, completed)
 	}
+	executeScopes(ctx, runnerConfig, "scoped")
 	pathsMu.Lock()
 	rootPath, childPath := paths["root"], paths["child"]
 	pathsMu.Unlock()
@@ -154,4 +159,37 @@ func TestMCPCLIRuntimeScopesRootAndSharedCommands(t *testing.T) {
 	privateRoot := filepath.Dir(filepath.Dir(filepath.Dir(rootPath)))
 	cancel()
 	require.Eventually(t, func() bool { _, err := os.Stat(privateRoot); return os.IsNotExist(err) }, time.Second, 10*time.Millisecond, "runtime cancellation must remove private command tree")
+	// A fresh runtime has only the immutable config, never the previous temporary
+	// tree. Rebuild both scopes and exercise them through the public A2A executor.
+	replacementCtx, cancelReplacement := context.WithCancel(t.Context())
+	defer cancelReplacement()
+	replacement, err := runtimeRunner.CreateRunnerConfig(replacementCtx, root, nil, "scoped_replacement", nil, nil)
+	require.NoError(t, err)
+	require.EqualValues(t, 2, rootCalls.Load(), "startup must not replay root calls")
+	require.EqualValues(t, 2, childCalls.Load(), "startup must not replay Shared calls")
+	executeScopes(replacementCtx, replacement, "scoped_replacement")
+	pathsMu.Lock()
+	newRootPath, newChildPath := paths["root"], paths["child"]
+	pathsMu.Unlock()
+	require.NotEmpty(t, newRootPath)
+	require.NotEmpty(t, newChildPath)
+	require.NotEqual(t, rootPath, newRootPath)
+	require.NotEqual(t, childPath, newChildPath)
+	require.NotEqual(t, filepath.Dir(newRootPath), filepath.Dir(newChildPath))
+	for _, scope := range []string{"root", "child"} {
+		path, other := newRootPath, "child_record"
+		if scope == "child" {
+			path, other = newChildPath, "root_record"
+		}
+		output, err := exec.Command(path, "--help").CombinedOutput()
+		require.NoError(t, err, "%s", output)
+		require.Contains(t, string(output), scope+"_record")
+		require.NotContains(t, string(output), other)
+		output, err = exec.Command(path, other, "--text", scope).CombinedOutput()
+		require.Error(t, err)
+		require.Contains(t, string(output), "excluded tool")
+	}
+	require.EqualValues(t, 3, rootCalls.Load())
+	require.EqualValues(t, 3, childCalls.Load())
+	require.Equal(t, originalPATH, os.Getenv("PATH"))
 }

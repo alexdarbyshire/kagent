@@ -178,6 +178,22 @@ removes command directories, and failed startup removes the partial command tree
 Compiled CLI bindings participate in immutable prepared revisions and are
 materialized from the selected runtime inputs at startup.
 
+Changing a binding's command name, endpoint, tool selection, description, or
+native/CLI presentation prepares a new revision. New Sessions use that revision;
+existing Sessions keep their compiled bindings, including bindings removed from
+the current template. Remote tool catalogs remain live: help and argument schemas
+come from the endpoint at invocation time, rather than a revision snapshot.
+
+Data suspend/resume starts fresh runtime containers from the pinned image and
+restored durable directories under the same Actor identity. The Go runtime
+rebuilds each root and Shared agent's private command directory and discovery
+guidance from its pinned configuration. Command directories are temporary runtime
+state, independent of `/data`; restoration performs no MCP tool calls. Failed
+startup removes the partial command tree, and a later startup rebuilds it from
+configuration. Existing Session lifecycle retries apply without replaying MCP
+calls. An externally deleted or same-name replacement Actor is not implicitly
+adopted by Resume.
+
 ## Prepared revision pipeline
 
 The controller compiles each Agent through one pipeline:
