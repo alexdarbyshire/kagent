@@ -70,6 +70,7 @@ func allowedRequestHeaders(ctx context.Context, allowed []string) map[string]str
 // mcpServerParams groups connection parameters for an MCP server,
 // reducing parameter sprawl across createTransport / initializeToolSet.
 type mcpServerParams struct {
+	HTTPTransport         *http.Transport // optional caller-owned pool for bounded command lifetimes
 	URL                   string
 	Headers               map[string]string
 	AllowedHeaders        []string              // header names to forward from incoming request
@@ -227,7 +228,10 @@ func createTransport(ctx context.Context, params mcpServerParams) (mcpsdk.Transp
 		}
 	}
 
-	baseTransport := &http.Transport{}
+	baseTransport := params.HTTPTransport
+	if baseTransport == nil {
+		baseTransport = &http.Transport{}
+	}
 
 	if params.TLSInsecureSkipVerify != nil && *params.TLSInsecureSkipVerify {
 		log.WarnContext(ctx, "TLS certificate verification disabled for MCP server", "url", params.URL)
