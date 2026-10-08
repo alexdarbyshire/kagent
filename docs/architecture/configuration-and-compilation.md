@@ -81,6 +81,9 @@ prepared revisions, not existing Sessions pinned to an older revision.
 
 ### MCP commands in the Go runtime
 
+For a complete authoring example and local JSON processing, see the
+[MCP command usage guide](mcp-command-usage.md).
+
 An AgentTemplate can present an MCP binding as a local command instead of native
 model tools by setting `tools[].mcp.exposeAsCLI: true`. The same field is available
 in an Agent's inline `spec.template`. Omitted or false retains native MCP

@@ -8,8 +8,10 @@ go build -o mcp-cli ./adk/cmd/mcp-cli
 
 The bridge consumes a private binding file supplied by its launcher. It is not
 an endpoint configuration interface for the model. This standalone executable
-currently supports Linux with procfs and Streamable HTTP. Agent YAML, command
-materialization, and runtime image packaging are not integrated yet.
+supports Linux with procfs, Streamable HTTP, and SSE. The Go ADK image packages
+it and materializes per-agent commands from compiled Agent YAML. For public
+configuration and a processing example, see the
+[MCP command usage guide](../../../../docs/architecture/mcp-command-usage.md).
 
 ```json
 {
@@ -28,10 +30,10 @@ materialization, and runtime image packaging are not integrated yet.
 
 The `http` object uses the existing Go MCP configuration fields. Omitted or
 empty `tools` selects all available tools. Static headers and existing TLS
-settings are supported. Credential injection and invocation-scoped identity will
-be integrated through the existing runtime path. Keep credentials out of compiled
-binding artifacts
-and model guidance. Command identity and connection settings come from this file;
+settings are supported. The integrated runtime preserves Substrate credential
+injection and provides invocation-scoped identity through a private handoff.
+Keep credentials out of compiled binding artifacts and model guidance.
+Command identity and connection settings come from this file;
 there are no tool-command endpoint flags.
 
 ```sh
@@ -67,9 +69,10 @@ termination request. Cancellation does not imply rollback of an upstream
 operation; an interrupted call can have an ambiguous outcome.
 
 This bridge rejects `require_approval: true`; retain native MCP presentation
-for protected bindings. Invocation header forwarding (`allowed_headers`), SSE
-transport/read timeout, and disabling session termination are unsupported here
-and fail explicitly. External JSON schema references are unsupported. Tool
+for protected bindings. Commands requiring invocation headers fail explicitly
+without the runtime handoff. SSE supports its native read timeout; Streamable HTTP
+`sse_read_timeout` and disabling session termination are unsupported and fail
+explicitly. External JSON schema references are unsupported. Tool
 schemas and result envelopes retain exact wire precision within the SDK's
 float64 numeric range; literals outside that range (for example, `1e400`) fail
 SDK decoding with an explicit error. Argument numbers retain their original JSON
