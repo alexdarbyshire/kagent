@@ -63,8 +63,16 @@ unsupported-interaction errors use stderr and exit status 1. Help uses stdout.
 No failure automatically retries the tool call. HTTP redirects and transport
 replay are disabled for MCP POSTs.
 
-SIGINT, SIGTERM, and the binding timeout cancel local work and close connection
-resources. Teardown is bounded even when the server does not answer its session
+Standalone SIGINT, SIGTERM, and the binding timeout cancel local work and close
+connection resources. Inside native Bash, the command delegates to its actor's
+private invocation socket. The actor retains a connection scoped to the actual
+application/user/Session/agent/branch/isolation scope across commands and resolves
+current invocation headers on each request. The command cannot choose its scope
+or endpoint. Cancellation ends the call; actor shutdown closes retained sessions.
+An expired or lost session is an explicit error, without action replay or recovery
+of old browser ownership. Input files are read relative to the command's working
+directory before delegation; JSON values and raw result numbers retain precision.
+Teardown is bounded even when the server does not answer its session
 termination request. Cancellation does not imply rollback of an upstream
 operation; an interrupted call can have an ambiguous outcome.
 

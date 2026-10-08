@@ -99,7 +99,7 @@ func createGoogleADKAgent(ctx context.Context, agentConfig *adk.AgentConfig, age
 	if hasSkills || commandDirectory != "" {
 		executionConfig := tools.ExecutionConfig{SkillsDirectory: skillsDirectory, CommandDirectory: commandDirectory}
 		if commandDirectory != "" {
-			executionConfig.PrepareEnvironment = mcp.PrepareCLIEnvironment(agentConfig.CLITools, propagateToken, dynamicHeaderProvider)
+			executionConfig.PrepareEnvironment = mcp.PrepareCLIEnvironment(ctx, agentConfig.CLITools, propagateToken, dynamicHeaderProvider)
 		}
 		executionTools, err := tools.NewExecutionTools(executionConfig)
 		if err != nil {

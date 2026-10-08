@@ -30,7 +30,12 @@ type cliSessionContext struct {
 	id string
 }
 
-func (c cliSessionContext) SessionID() string { return c.id }
+func (c cliSessionContext) SessionID() string      { return c.id }
+func (c cliSessionContext) AppName() string        { return "cli-test" }
+func (c cliSessionContext) UserID() string         { return c.id }
+func (c cliSessionContext) AgentName() string      { return "cli-test" }
+func (c cliSessionContext) Branch() string         { return "" }
+func (c cliSessionContext) IsolationScope() string { return "" }
 
 func TestCLIExecutableInvocationHeadersAndIsolation(t *testing.T) {
 	binary := filepath.Join(t.TempDir(), "mcp-cli")
@@ -74,7 +79,7 @@ func TestCLIExecutableInvocationHeadersAndIsolation(t *testing.T) {
 		sequence := providerCalls[index].Add(1)
 		return map[string]string{"Authorization": "Bearer exchanged-" + id, "X-Order": "dynamic", "X-Dynamic": fmt.Sprintf("%s-%d", id, sequence)}
 	}
-	prepare := PrepareCLIEnvironment([]adk.MCPCLIConfig{binding}, true, provider)
+	prepare := PrepareCLIEnvironment(t.Context(), []adk.MCPCLIConfig{binding}, true, provider)
 	var socketsMu sync.Mutex
 	var sockets []string
 	executor := tools.NewCommandExecutor(tools.ExecutionConfig{PrepareEnvironment: func(original, lifetime context.Context) ([]string, func(), error) {
@@ -89,18 +94,20 @@ func TestCLIExecutableInvocationHeadersAndIsolation(t *testing.T) {
 	var wg sync.WaitGroup
 	for _, id := range []string{"alice", "bob"} {
 		wg.Go(func() {
-			ctx, _ := a2asrv.NewCallContext(t.Context(), a2asrv.NewServiceParams(map[string][]string{
-				"Authorization": {"Bearer incoming-" + id}, "X-Order": {"allowed"}, "X-Allowed": {id}, "X-Ignored": {"must-not-forward"},
-			}))
-			ctx = auth.WithUserID(ctx, id)
-			ctx = trace.ContextWithSpanContext(ctx, trace.NewSpanContext(trace.SpanContextConfig{TraceID: trace.TraceID{1}, SpanID: trace.SpanID{2}, TraceFlags: trace.FlagsSampled}))
-			result, err := executor.ExecuteCommand(cliSessionContext{Context: ctx, id: id}, fmt.Sprintf("%q --binding-file %q record", binary, file), t.TempDir())
-			assert.NoError(t, err)
-			assert.Contains(t, result, "recorded")
+			for _, allowed := range []string{id, id + "-next"} {
+				ctx, _ := a2asrv.NewCallContext(t.Context(), a2asrv.NewServiceParams(map[string][]string{
+					"Authorization": {"Bearer incoming-" + id}, "X-Order": {"allowed"}, "X-Allowed": {allowed}, "X-Ignored": {"must-not-forward"},
+				}))
+				ctx = auth.WithUserID(ctx, id)
+				ctx = trace.ContextWithSpanContext(ctx, trace.NewSpanContext(trace.SpanContextConfig{TraceID: trace.TraceID{1}, SpanID: trace.SpanID{2}, TraceFlags: trace.FlagsSampled}))
+				result, err := executor.ExecuteCommand(cliSessionContext{Context: ctx, id: id}, fmt.Sprintf("%q --binding-file %q record", binary, file), t.TempDir())
+				assert.NoError(t, err)
+				assert.Contains(t, result, "recorded")
+			}
 		})
 	}
 	wg.Wait()
-	require.EqualValues(t, 2, calls.Load())
+	require.EqualValues(t, 4, calls.Load())
 	observedMu.Lock()
 	defer observedMu.Unlock()
 	for index, id := range []string{"alice", "bob"} {
@@ -108,17 +115,20 @@ func TestCLIExecutableInvocationHeadersAndIsolation(t *testing.T) {
 		require.GreaterOrEqual(t, len(headers), 3)
 		require.EqualValues(t, len(headers), providerCalls[index].Load(), "resolve dynamic headers separately for every remote request")
 		seen := map[string]bool{}
+		seenAllowed := map[string]bool{}
 		for _, header := range headers {
 			require.Equal(t, "Bearer exchanged-"+id, header.Get("Authorization"))
 			require.Equal(t, "static", header.Get("X-Order"))
-			require.Equal(t, id, header.Get("X-Allowed"))
+			require.Contains(t, []string{id, id + "-next"}, header.Get("X-Allowed"))
+			seenAllowed[header.Get("X-Allowed")] = true
 			require.Empty(t, header.Get("X-Ignored"))
 			require.Contains(t, header.Get("Traceparent"), "01000000000000000000000000000000")
 			require.False(t, seen[header.Get("X-Dynamic")])
 			seen[header.Get("X-Dynamic")] = true
 		}
+		require.True(t, seenAllowed[id+"-next"], "same-session follow-up must use its fresh invocation headers")
 	}
-	require.Len(t, sockets, 2)
+	require.Len(t, sockets, 4)
 	require.NotEqual(t, sockets[0], sockets[1])
 	for _, socket := range sockets {
 		_, err := os.Stat(filepath.Dir(socket))
@@ -127,7 +137,7 @@ func TestCLIExecutableInvocationHeadersAndIsolation(t *testing.T) {
 	output, err = exec.Command(binary, "--binding-file", file, "record").CombinedOutput()
 	require.Error(t, err)
 	require.Contains(t, string(output), "requires a live invocation")
-	require.EqualValues(t, 2, calls.Load())
+	require.EqualValues(t, 4, calls.Load())
 }
 
 func TestCLIInvocationRejectsOtherBindingAndClosesOnCancellation(t *testing.T) {
@@ -136,7 +146,7 @@ func TestCLIInvocationRejectsOtherBindingAndClosesOnCancellation(t *testing.T) {
 	defer remote.Close()
 	ctx, cancel := context.WithCancel(t.Context())
 	binding := adk.MCPCLIConfig{Name: "browser", HTTP: adk.HttpMcpServerConfig{Params: adk.StreamableHTTPConnectionParams{Url: remote.URL}}}
-	environment, cleanup, err := PrepareCLIEnvironment([]adk.MCPCLIConfig{binding}, false, nil)(ctx, ctx)
+	environment, cleanup, err := PrepareCLIEnvironment(t.Context(), []adk.MCPCLIConfig{binding}, false, nil)(ctx, ctx)
 	require.NoError(t, err)
 	defer cleanup()
 	socket := strings.TrimPrefix(environment[0], cliInvocationSocket+"=")
@@ -168,7 +178,7 @@ func TestCLIInvocationShellFailureAndCancellationCleanup(t *testing.T) {
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			opened := make(chan string, 1)
-			prepare := PrepareCLIEnvironment(nil, false, nil)
+			prepare := PrepareCLIEnvironment(t.Context(), nil, false, nil)
 			executor := tools.NewCommandExecutor(tools.ExecutionConfig{PrepareEnvironment: func(original, lifetime context.Context) ([]string, func(), error) {
 				environment, cleanup, err := prepare(original, lifetime)
 				if err == nil {
@@ -209,10 +219,28 @@ func TestCLIInvocationShellFailureAndCancellationCleanup(t *testing.T) {
 func TestCLIInvocationSocketSetupFailureStopsShell(t *testing.T) {
 	directory := t.TempDir()
 	t.Setenv("TMPDIR", filepath.Join(directory, "missing"))
-	executor := tools.NewCommandExecutor(tools.ExecutionConfig{PrepareEnvironment: PrepareCLIEnvironment(nil, false, nil)})
+	executor := tools.NewCommandExecutor(tools.ExecutionConfig{PrepareEnvironment: PrepareCLIEnvironment(t.Context(), nil, false, nil)})
 	marker := filepath.Join(directory, "unexpected-execution")
 	_, err := executor.ExecuteCommand(t.Context(), fmt.Sprintf("touch %q", marker), directory)
 	require.ErrorContains(t, err, "create MCP invocation directory")
 	_, err = os.Stat(marker)
 	require.True(t, os.IsNotExist(err), "handoff setup failure must stop execution")
+}
+
+func TestCLIInvocationSocketFollowsActorLifetime(t *testing.T) {
+	owner, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	environment, cleanup, err := PrepareCLIEnvironment(owner, nil, false, nil)(t.Context(), t.Context())
+	require.NoError(t, err)
+	defer cleanup()
+	socket := strings.TrimPrefix(environment[0], cliInvocationSocket+"=")
+	cancel()
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(filepath.Dir(socket))
+		return os.IsNotExist(err)
+	}, time.Second, time.Millisecond, "actor shutdown must remove a live invocation socket")
+	environment, cleanup, err = PrepareCLIEnvironment(owner, nil, false, nil)(t.Context(), t.Context())
+	require.ErrorContains(t, err, "runtime stopped")
+	require.Nil(t, environment)
+	require.Nil(t, cleanup)
 }

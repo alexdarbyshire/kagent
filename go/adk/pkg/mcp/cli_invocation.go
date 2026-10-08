@@ -23,9 +23,10 @@ import (
 // carries no credential and is valid only for the lifetime of one Bash call.
 const cliInvocationSocket = "KAGENT_MCP_CLI_INVOCATION_SOCKET"
 
-// PrepareCLIEnvironment returns a generic execution hook. Header resolution
-// stays in MCP; command execution only installs the returned environment.
-func PrepareCLIEnvironment(bindings []adk.MCPCLIConfig, propagateToken bool, provider DynamicHeaderProvider) func(context.Context, context.Context) ([]string, func(), error) {
+// PrepareCLIEnvironment owns MCP command sessions for the actor's lifetime.
+// Each execution hook binds its private socket to the original agent context;
+// command execution only installs the returned environment.
+func PrepareCLIEnvironment(owner context.Context, bindings []adk.MCPCLIConfig, propagateToken bool, provider DynamicHeaderProvider) func(context.Context, context.Context) ([]string, func(), error) {
 	resolvers := make(map[string]*headerRoundTripper, len(bindings))
 	for _, binding := range bindings {
 		headers, allowed := binding.HTTP.Params.Headers, binding.HTTP.AllowedHeaders
@@ -34,7 +35,15 @@ func PrepareCLIEnvironment(bindings []adk.MCPCLIConfig, propagateToken bool, pro
 		}
 		resolvers[binding.Name] = &headerRoundTripper{headers: headers, allowedHeaders: allowed, propagateToken: propagateToken, headerProvider: provider}
 	}
+	commands := &cliCommandRuntime{ctx: owner, bindings: make(map[string]adk.MCPCLIConfig), resolvers: resolvers, sessions: make(map[cliSessionKey]*cliCommandSession)}
+	for _, binding := range bindings {
+		commands.bindings[binding.Name] = binding
+	}
+	context.AfterFunc(owner, commands.close)
 	return func(invocation, lifetime context.Context) ([]string, func(), error) {
+		if err := owner.Err(); err != nil {
+			return nil, nil, fmt.Errorf("MCP command runtime stopped: %w", err)
+		}
 		directory, err := os.MkdirTemp("", "kcli-")
 		if err != nil {
 			return nil, nil, fmt.Errorf("create MCP invocation directory: %w", err)
@@ -51,6 +60,25 @@ func PrepareCLIEnvironment(bindings []adk.MCPCLIConfig, propagateToken bool, pro
 			ReadHeaderTimeout: time.Second,
 			BaseContext:       func(net.Listener) context.Context { return lifetime },
 			Handler: http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+				if request.Method == http.MethodPost && strings.HasPrefix(request.URL.Path, "/command/") {
+					if lifetime.Err() != nil || invocation.Err() != nil {
+						http.Error(w, "MCP invocation ended", http.StatusGone)
+						return
+					}
+					var input cliCommandRequest
+					decoder := json.NewDecoder(request.Body)
+					decoder.DisallowUnknownFields()
+					if err := decoder.Decode(&input); err != nil {
+						http.Error(w, "invalid MCP command", http.StatusBadRequest)
+						return
+					}
+					result := commands.run(request.Context(), invocation, strings.TrimPrefix(request.URL.Path, "/command/"), input)
+					w.Header().Set("Content-Type", "application/json")
+					if err := json.NewEncoder(w).Encode(result); err != nil {
+						logging.FromContext(invocation).DebugContext(invocation, "MCP command handoff ended", "error", err)
+					}
+					return
+				}
 				name := strings.TrimPrefix(request.URL.Path, "/headers/")
 				resolver, ok := resolvers[name]
 				if request.Method != http.MethodGet || !strings.HasPrefix(request.URL.Path, "/headers/") || !ok {
@@ -93,7 +121,14 @@ func PrepareCLIEnvironment(bindings []adk.MCPCLIConfig, propagateToken bool, pro
 			})
 		}
 		stop := context.AfterFunc(lifetime, cleanup)
-		return []string{cliInvocationSocket + "=" + socket}, func() { stop(); cleanup() }, nil
+		stopOwner := context.AfterFunc(owner, cleanup)
+		if err := owner.Err(); err != nil {
+			stop()
+			stopOwner()
+			cleanup()
+			return nil, nil, fmt.Errorf("MCP command runtime stopped: %w", err)
+		}
+		return []string{cliInvocationSocket + "=" + socket}, func() { stop(); stopOwner(); cleanup() }, nil
 	}
 }
 
