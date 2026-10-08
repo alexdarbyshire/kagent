@@ -10,13 +10,14 @@ import (
 )
 
 func (c *Builder) addCLI(config *adk.AgentConfig, server *v1alpha3.RemoteMCPServer, binding v1alpha3.MCPToolBinding, headers map[string]string) error {
-	if server.Spec.Protocol != "" && server.Spec.Protocol != v1alpha3.RemoteMCPServerProtocolStreamableHttp {
-		return v2translator.NewValidationError("MCP CLI binding %q requires Streamable HTTP; SSE is pending CLI-3", server.Name)
+	isSSE := server.Spec.Protocol == v1alpha3.RemoteMCPServerProtocolSse
+	if server.Spec.Protocol != "" && server.Spec.Protocol != v1alpha3.RemoteMCPServerProtocolStreamableHttp && !isSSE {
+		return v2translator.NewValidationError("MCP CLI binding %q requires Streamable HTTP or SSE", server.Name)
 	}
-	if server.Spec.SseReadTimeout != nil {
-		return v2translator.NewValidationError("MCP CLI binding %q does not support sseReadTimeout; pending CLI-3", server.Name)
+	if !isSSE && server.Spec.SseReadTimeout != nil {
+		return v2translator.NewValidationError("MCP CLI Streamable HTTP binding %q does not support sseReadTimeout", server.Name)
 	}
-	if server.Spec.TerminateOnClose != nil && !*server.Spec.TerminateOnClose {
+	if !isSSE && server.Spec.TerminateOnClose != nil && !*server.Spec.TerminateOnClose {
 		return v2translator.NewValidationError("MCP CLI binding %q requires terminateOnClose: true", server.Name)
 	}
 	endpoint, err := url.Parse(server.Spec.URL)
@@ -26,13 +27,23 @@ func (c *Builder) addCLI(config *adk.AgentConfig, server *v1alpha3.RemoteMCPServ
 	if server.Spec.Timeout != nil && server.Spec.Timeout.Duration <= 0 {
 		return v2translator.NewValidationError("MCP CLI binding %q requires a positive timeout", server.Name)
 	}
+	if isSSE && server.Spec.SseReadTimeout != nil && server.Spec.SseReadTimeout.Duration <= 0 {
+		return v2translator.NewValidationError("MCP CLI binding %q requires a positive sseReadTimeout", server.Name)
+	}
 	// Reuse the native projection so HTTP settings retain one source of truth.
 	native := &adk.AgentConfig{}
 	if err := c.addRemoteMCPServer(native, server, binding.Tools, binding.RequireApproval, headers); err != nil {
 		return err
 	}
-	config.CLITools = append(config.CLITools, adk.MCPCLIConfig{Name: server.Name, Description: server.Spec.Description, HTTP: native.HttpTools[0]})
-	config.CLITools[len(config.CLITools)-1].HTTP.Tools = slices.Clone(binding.Tools)
+	cli := adk.MCPCLIConfig{Name: server.Name, Description: server.Spec.Description}
+	if isSSE {
+		cli.SSE = &native.SseTools[0]
+		cli.SSE.Tools = slices.Clone(binding.Tools)
+	} else {
+		cli.HTTP = native.HttpTools[0]
+		cli.HTTP.Tools = slices.Clone(binding.Tools)
+	}
+	config.CLITools = append(config.CLITools, cli)
 	return nil
 }
 

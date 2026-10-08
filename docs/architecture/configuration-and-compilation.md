@@ -143,13 +143,27 @@ commands in one agent and names that shadow shipped platform commands or Bash
 builtins, such as `grep`, `test`, or `true`, fail preparation. Rename the referenced
 RemoteMCPServer or retain native MCP presentation in those cases.
 
-CLI bindings currently support Streamable HTTP, configured endpoint paths, static
+CLI bindings support Streamable HTTP and SSE, configured endpoint paths, static
 or Secret-backed headers, positive timeouts, and supported TLS verification
 settings. Secret-backed headers retain destination-scoped Substrate credential
-injection and CLI endpoints remain in the compiled egress allowlist. SSE,
-`sseReadTimeout`, `terminateOnClose: false`, caller-token propagation, and STS
-dynamic headers fail explicitly until their invocation handoff is supported.
-Native MCP retains its existing connection and authentication paths.
+injection and CLI endpoints remain in the compiled egress allowlist. Gateway
+bindings retain their configured route. SSE read timeouts follow the native
+transport. Streamable HTTP `sseReadTimeout` and `terminateOnClose: false` are
+explicitly unsupported. Both transports reject redirects, and SSE message
+endpoints must stay on the configured origin. Mutating POSTs are never replayed
+automatically after an ambiguous failure.
+
+Caller-token propagation, allowed incoming headers, and STS dynamic headers
+use the same header resolver as native MCP. For each Bash invocation, the parent
+opens a private Unix socket admitting only that agent's binding names. Children
+inherit its location and resolve headers against the original invocation context
+on every remote request; caller and STS tokens are not put in command arguments,
+binding files, compiled configuration, or discovery. Propagated Authorization and
+authenticated user identity apply first, then explicitly allowed incoming headers,
+dynamic STS headers, and static headers, in ascending priority. Teardown closes
+the socket and removes its directory on success, failure, and cancellation.
+Direct subprocess commands remain usable without this handoff for static
+bindings; commands requiring invocation headers fail explicitly without it.
 
 `requireApproval: true` with CLI exposure fails preparation, including Shared
 children. Protected bindings retain native presentation to use human approval.

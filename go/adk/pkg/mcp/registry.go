@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"maps"
 	"net/http"
 	"os"
 	"os/exec"
@@ -318,42 +319,50 @@ type headerRoundTripper struct {
 
 func (rt *headerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	req = req.Clone(req.Context())
+	maps.Copy(req.Header, rt.resolveHeaders(req.Context()))
+	return rt.base.RoundTrip(req)
+}
+
+// resolveHeaders is shared by native transport and the invocation-scoped CLI
+// handoff. The caller supplies the original ADK context, including SessionID.
+func (rt *headerRoundTripper) resolveHeaders(ctx context.Context) http.Header {
+	headers := make(http.Header)
 
 	// When KAGENT_PROPAGATE_TOKEN is set, forward Authorization from the incoming
 	// A2A request independently of allowedHeaders. Carry the authenticated user
 	// alongside it so kagent callbacks preserve ownership in insecure and
 	// trusted-proxy deployments. This remains opt-in for all configured servers.
 	if rt.propagateToken {
-		if userID := auth.UserIDFromContext(req.Context()); userID != "" {
-			req.Header.Set("X-User-Id", userID)
+		if userID := auth.UserIDFromContext(ctx); userID != "" {
+			headers.Set("X-User-Id", userID)
 		}
-		if callCtx, ok := a2asrv.CallContextFrom(req.Context()); ok {
+		if callCtx, ok := a2asrv.CallContextFrom(ctx); ok {
 			if meta := callCtx.ServiceParams(); meta != nil {
 				if vals, ok := meta.Get(constants.AuthorizationHeader); ok && len(vals) > 0 && vals[0] != "" {
-					req.Header.Set(constants.AuthorizationHeader, vals[0])
+					headers.Set(constants.AuthorizationHeader, vals[0])
 				}
 			}
 		}
 	}
 
 	// Forward explicitly allowed headers from the incoming A2A request.
-	for k, v := range allowedRequestHeaders(req.Context(), rt.allowedHeaders) {
-		req.Header.Set(k, v)
+	for k, v := range allowedRequestHeaders(ctx, rt.allowedHeaders) {
+		headers.Set(k, v)
 	}
 
 	// Dynamic headers (e.g., STS access tokens) override propagated/allowed headers.
 	if rt.headerProvider != nil {
-		for key, value := range rt.headerProvider(req.Context()) {
-			req.Header.Set(key, value)
+		for key, value := range rt.headerProvider(ctx) {
+			headers.Set(key, value)
 		}
 	}
 
 	// Apply static headers last — they take precedence over all dynamic sources.
 	for key, value := range rt.headers {
-		req.Header.Set(key, value)
+		headers.Set(key, value)
 	}
 
-	return rt.base.RoundTrip(req)
+	return headers
 }
 
 // initializeToolSet fetches tools from an MCP server using Google ADK's

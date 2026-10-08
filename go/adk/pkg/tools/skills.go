@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -133,6 +134,9 @@ type grepFileInput struct {
 type ExecutionConfig struct {
 	SkillsDirectory  string
 	CommandDirectory string
+	// PrepareEnvironment receives the original invocation and a bounded command
+	// lifetime. The returned cleanup releases private execution resources.
+	PrepareEnvironment func(context.Context, context.Context) ([]string, func(), error)
 }
 
 // NewExecutionTools creates the existing filesystem and Bash tools when skills

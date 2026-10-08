@@ -21,7 +21,7 @@ type cliScopes struct {
 	agents    map[*adk.AgentConfig]string
 }
 
-func materializeCLI(root *adk.AgentConfig) (_ *cliScopes, err error) {
+func materializeCLI(root *adk.AgentConfig, invocationHeaders bool) (_ *cliScopes, err error) {
 	scopes := &cliScopes{agents: map[*adk.AgentConfig]string{}}
 	var agents []*adk.AgentConfig
 	var visit func(*adk.AgentConfig) error
@@ -72,9 +72,13 @@ func materializeCLI(root *adk.AgentConfig) (_ *cliScopes, err error) {
 			return nil, fmt.Errorf("failed to create MCP command directory: %w", err)
 		}
 		for _, binding := range config.CLITools {
-			if binding.HTTP.RequireApproval {
+			if err := binding.ValidateTransport(); err != nil {
+				return nil, err
+			}
+			if binding.HTTP.RequireApproval || (binding.SSE != nil && binding.SSE.RequireApproval) {
 				return nil, fmt.Errorf("MCP CLI binding %q does not support require_approval: true", binding.Name)
 			}
+			binding.RequiresInvocationHeaders = invocationHeaders || len(binding.HTTP.AllowedHeaders) > 0 || (binding.SSE != nil && len(binding.SSE.AllowedHeaders) > 0)
 			file := filepath.Join(private, binding.Name+".json")
 			data, err := json.Marshal(binding)
 			if err != nil {

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/kagent-dev/kagent/go/api/adk"
 	"github.com/kagent-dev/kagent/go/api/v1alpha3"
@@ -52,6 +53,33 @@ func TestCompileAgentCLIReplacesNativeAndRetainsEgress(t *testing.T) {
 	require.Equal(t, harness.Spec.Workload.Args, result.Args)
 }
 
+func TestCompileAgentCLISSEAndInvocationAuthentication(t *testing.T) {
+	harness, template := cliConfiguration()
+	harness.Spec.Env = []v1alpha3.RuntimeEnvVar{{Name: "KAGENT_PROPAGATE_TOKEN", Value: "true"}, {Name: "KAGENT_STS_WELL_KNOWN_URI", Value: "https://sts.example/.well-known/oauth-authorization-server"}}
+	server := remoteMCPServer("browser", "http://browser.example:8080/gateway/sse")
+	server.Spec.Protocol = v1alpha3.RemoteMCPServerProtocolSse
+	server.Spec.Timeout = &metav1.Duration{Duration: 3 * time.Second}
+	server.Spec.SseReadTimeout = &metav1.Duration{Duration: 10 * time.Second}
+	result, err := cliCompiler(t, harness.Spec.Workload.Image, modelConfig(), server).CompileAgent(t.Context(), inlineAgent(harness, template))
+	require.NoError(t, err)
+	var config map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(result.ConfigJSON, &config))
+	var bindings []struct {
+		HTTP adk.HttpMcpServerConfig `json:"http"`
+		SSE  *adk.SseMcpServerConfig `json:"sse"`
+	}
+	require.NoError(t, json.Unmarshal(config["cli_tools"], &bindings))
+	require.Len(t, bindings, 1)
+	require.Empty(t, bindings[0].HTTP.Params.Url)
+	require.NotNil(t, bindings[0].SSE)
+	require.Equal(t, server.Spec.URL, bindings[0].SSE.Params.Url)
+	require.Equal(t, 3.0, *bindings[0].SSE.Params.Timeout)
+	require.Equal(t, 10.0, *bindings[0].SSE.Params.SseReadTimeout)
+	require.Equal(t, []string{"navigate"}, bindings[0].SSE.Tools)
+	require.Empty(t, config["sse_tools"])
+	require.Contains(t, result.EgressDestinations, "http://browser.example:8080")
+}
+
 func cliConfiguration() (*v1alpha3.Harness, *v1alpha3.AgentTemplate) {
 	harness := &v1alpha3.Harness{ObjectMeta: metav1.ObjectMeta{Name: "go", Namespace: "test"}, Spec: v1alpha3.HarnessSpec{
 		Kagent: &v1alpha3.KagentHarness{}, Workload: v1alpha3.HarnessWorkload{Image: "example.com/go@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Args: []string{"--log-level", "debug"}},
@@ -83,12 +111,13 @@ func TestCompileAgentCLIRejectsUnsupportedAndCollidingBindings(t *testing.T) {
 		{"protected", func(_ *v1alpha3.Harness, a *v1alpha3.AgentTemplate, _ *v1alpha3.RemoteMCPServer) {
 			a.Spec.Tools[0].MCP.RequireApproval = true
 		}, "requireApproval"},
-		{"SSE", func(_ *v1alpha3.Harness, _ *v1alpha3.AgentTemplate, s *v1alpha3.RemoteMCPServer) {
-			s.Spec.Protocol = v1alpha3.RemoteMCPServerProtocolSse
-		}, "SSE"},
 		{"read timeout", func(_ *v1alpha3.Harness, _ *v1alpha3.AgentTemplate, s *v1alpha3.RemoteMCPServer) {
 			s.Spec.SseReadTimeout = &metav1.Duration{Duration: 1}
 		}, "sseReadTimeout"},
+		{"SSE nonpositive read timeout", func(_ *v1alpha3.Harness, _ *v1alpha3.AgentTemplate, s *v1alpha3.RemoteMCPServer) {
+			s.Spec.Protocol = v1alpha3.RemoteMCPServerProtocolSse
+			s.Spec.SseReadTimeout = &metav1.Duration{}
+		}, "positive sseReadTimeout"},
 		{"termination", func(_ *v1alpha3.Harness, _ *v1alpha3.AgentTemplate, s *v1alpha3.RemoteMCPServer) {
 			s.Spec.TerminateOnClose = new(false)
 		}, "terminateOnClose"},
@@ -109,9 +138,6 @@ func TestCompileAgentCLIRejectsUnsupportedAndCollidingBindings(t *testing.T) {
 			s.Name = "awk"
 			a.Spec.Tools[0].MCP.Server.Name = s.Name
 		}, "reserved"},
-		{"token forwarding", func(h *v1alpha3.Harness, _ *v1alpha3.AgentTemplate, _ *v1alpha3.RemoteMCPServer) {
-			h.Spec.Env = []v1alpha3.RuntimeEnvVar{{Name: "KAGENT_PROPAGATE_TOKEN", Value: "true"}}
-		}, "CLI-3"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			h, a := cliConfiguration()
