@@ -240,5 +240,10 @@ func (c lifecycleToolContext) Deadline() (time.Time, bool)                      
 func (c lifecycleToolContext) Done() <-chan struct{}                              { return c.underlying.Done() }
 func (c lifecycleToolContext) Err() error                                         { return c.underlying.Err() }
 func (c lifecycleToolContext) Value(key any) any                                  { return c.underlying.Value(key) }
-func (lifecycleToolContext) SessionID() string                                    { return "forwarded" }
+func (lifecycleToolContext) SessionID() string                                    { return "test-session" }
+func (lifecycleToolContext) AppName() string                                      { return "test-app" }
+func (lifecycleToolContext) UserID() string                                       { return "test-user" }
+func (lifecycleToolContext) AgentName() string                                    { return "test-agent" }
+func (lifecycleToolContext) Branch() string                                       { return "" }
+func (lifecycleToolContext) IsolationScope() string                               { return "" }
 func (lifecycleToolContext) ToolConfirmation() *toolconfirmation.ToolConfirmation { return nil }

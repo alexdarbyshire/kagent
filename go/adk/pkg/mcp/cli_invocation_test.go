@@ -113,7 +113,7 @@ func TestCLIExecutableInvocationHeadersAndIsolation(t *testing.T) {
 	for index, id := range []string{"alice", "bob"} {
 		headers := observed[id]
 		require.GreaterOrEqual(t, len(headers), 3)
-		require.EqualValues(t, len(headers), providerCalls[index].Load(), "resolve dynamic headers separately for every remote request")
+		require.GreaterOrEqual(t, providerCalls[index].Load(), int32(len(headers)), "every remote request resolves current dynamic authority; scope selection also resolves opaque authority identity")
 		seen := map[string]bool{}
 		seenAllowed := map[string]bool{}
 		for _, header := range headers {

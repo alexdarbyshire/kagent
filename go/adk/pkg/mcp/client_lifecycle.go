@@ -2,7 +2,9 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"maps"
 	"net/http"
 	"sync"
@@ -36,21 +38,24 @@ const shutdownTimeout = time.Second
 // ClientLifecycle owns SDK connections and their local pools for a host lifetime.
 // It holds provider references, never invocation contexts or credential snapshots.
 type ClientLifecycle struct {
-	provider    LifecycleAuthorityProvider
-	mu          sync.Mutex
-	connections []*ownedConnection
-	closed      bool
-	once        sync.Once
-	outcomes    []TerminationOutcome
-	running     context.Context
-	stop        context.CancelFunc
+	provider      LifecycleAuthorityProvider
+	mu            sync.Mutex
+	connections   []*ownedConnection
+	relationships map[relationshipKey]*clientRelationship
+	closed        bool
+	once          sync.Once
+	outcomes      []TerminationOutcome
+	running       context.Context
+	stop          context.CancelFunc
 }
 
 type ownedConnection struct {
-	connection mcpsdk.Connection
-	transport  *managedHTTPTransport
-	pool       *http.Transport
-	cancel     context.CancelFunc
+	connection   mcpsdk.Connection
+	transport    *managedHTTPTransport
+	pool         *http.Transport
+	cancel       context.CancelFunc
+	relationship *clientRelationship
+	releaseOnce  sync.Once
 }
 
 // NewClientLifecycle attaches bounded shared teardown to the host's lifetime.
@@ -73,6 +78,7 @@ func (c *ClientLifecycle) Close() []TerminationOutcome {
 		c.closed = true
 		connections := c.connections
 		c.connections = nil
+		c.relationships = nil
 		c.mu.Unlock()
 		var wg sync.WaitGroup
 		shutdown, cancelShutdown := context.WithTimeout(context.Background(), shutdownTimeout)
@@ -87,11 +93,7 @@ func (c *ClientLifecycle) Close() []TerminationOutcome {
 			wg.Go(func() {
 				// SDK Close cancels streams after attempting DELETE. The HTTP
 				// wrapper gives every attempt the same finite maximum budget.
-				if err := owned.connection.Close(); err != nil {
-					owned.transport.recordFailure(err)
-				}
-				owned.cancel()
-				owned.pool.CloseIdleConnections()
+				owned.release(shutdown)
 			})
 		}
 		wg.Wait()
@@ -117,6 +119,9 @@ func (c *ClientLifecycle) register(owned *ownedConnection) bool {
 		return false
 	}
 	c.connections = append(c.connections, owned)
+	if owned.relationship != nil {
+		owned.relationship.connections = append(owned.relationship.connections, owned)
+	}
 	return true
 }
 
@@ -134,6 +139,7 @@ type managedHTTPTransport struct {
 	legacySSE      bool
 	initialization context.Context
 	commandHeaders *cliCommandHeaders
+	lost           bool
 }
 
 var _ http.RoundTripper = (*managedHTTPTransport)(nil)
@@ -184,7 +190,7 @@ func (m *managedHTTPTransport) RoundTrip(request *http.Request) (*http.Response,
 			request = request.Clone(context.WithValue(request.Context(), lifecycleHeadersKey{}, true))
 			maps.Copy(request.Header, headers)
 		}
-		return m.base.RoundTrip(request)
+		return m.dispatch(request)
 	}
 	// SDK Close may use a cancelled or detached connection context. Resolve
 	// existing provider custody using a new bounded context with no invocation.
@@ -290,9 +296,12 @@ func (m *managedHTTPTransport) outcome() TerminationOutcome {
 }
 
 type managedTransport struct {
-	inner    mcpsdk.Transport
-	owner    *ClientLifecycle
-	resolver *headerRoundTripper
+	inner        mcpsdk.Transport
+	owner        *ClientLifecycle
+	resolver     *headerRoundTripper
+	mu           sync.Mutex
+	connected    bool
+	relationship *clientRelationship
 }
 
 type registeredTransport struct {
@@ -324,6 +333,18 @@ func (r *registeredTransport) Connect(ctx context.Context) (mcpsdk.Connection, e
 var _ mcpsdk.Transport = (*managedTransport)(nil)
 
 func (m *managedTransport) Connect(ctx context.Context) (mcpsdk.Connection, error) {
+	m.mu.Lock()
+	replacing := m.connected
+	m.mu.Unlock()
+	if operation, _ := ctx.Value(operationKey{}).(*clientOperation); replacing && operation != nil {
+		operation.mu.Lock()
+		operation.lost = true
+		operation.mu.Unlock()
+		return nil, errors.New("MCP relationship state lost; establish fresh custody with a subsequent deliberate operation")
+	}
+	if operation, _ := ctx.Value(operationKey{}).(*clientOperation); operation != nil && operation.stateLost() {
+		return nil, errors.New("MCP relationship state lost; operation not replayed")
+	}
 	pool := m.resolver.base.(*http.Transport).Clone()
 	copyResolver := *m.resolver
 	copyResolver.base = pool
@@ -333,6 +354,7 @@ func (m *managedTransport) Connect(ctx context.Context) (mcpsdk.Connection, erro
 	switch inner := m.inner.(type) {
 	case *mcpsdk.StreamableClientTransport:
 		copyTransport, copyClient := *inner, *inner.HTTPClient
+		copyTransport.MaxRetries = -1
 		copyClient.CheckRedirect = terminationRedirectPolicy(copyClient.CheckRedirect)
 		managed.endpoint = inner.Endpoint
 		if _, err := managed.lifecycleHeaders(context.Background()); err != nil {
@@ -369,7 +391,7 @@ func (m *managedTransport) Connect(ctx context.Context) (mcpsdk.Connection, erro
 		pool.CloseIdleConnections()
 		return nil, err
 	}
-	owned := &ownedConnection{connection: connection, transport: managed, pool: pool, cancel: cancel}
+	owned := &ownedConnection{connection: connection, transport: managed, pool: pool, cancel: cancel, relationship: m.relationship}
 	if !m.owner.register(owned) {
 		cancel()
 		pool.CloseIdleConnections()
@@ -378,6 +400,9 @@ func (m *managedTransport) Connect(ctx context.Context) (mcpsdk.Connection, erro
 		}
 		return nil, errors.New("MCP client lifecycle stopped")
 	}
+	m.mu.Lock()
+	m.connected = true
+	m.mu.Unlock()
 	return connection, nil
 }
 
@@ -398,7 +423,7 @@ func createManagedTransport(ctx context.Context, params mcpServerParams) (mcpsdk
 		return nil, err
 	}
 	resolver := &headerRoundTripper{base: params.HTTPTransport, headers: params.Headers, allowedHeaders: params.AllowedHeaders, propagateToken: params.PropagateToken, headerProvider: params.HeaderProvider}
-	return &managedTransport{inner: transport, owner: params.Lifecycle, resolver: resolver}, nil
+	return &managedTransport{inner: transport, owner: params.Lifecycle, resolver: resolver, relationship: params.relationship}, nil
 }
 
 func terminationRedirectPolicy(original func(*http.Request, []*http.Request) error) func(*http.Request, []*http.Request) error {
@@ -416,4 +441,71 @@ func terminationRedirectPolicy(original func(*http.Request, []*http.Request) err
 		}
 		return nil
 	}
+}
+
+// The SDK remains the protocol owner. This boundary prevents a presentation's
+// hidden refresher and net/http's reused-connection replay from repeating writes.
+func (m *managedHTTPTransport) dispatch(request *http.Request) (*http.Response, error) {
+	var call struct {
+		Method string `json:"method"`
+	}
+	if request.Method == http.MethodPost && request.GetBody != nil {
+		body, err := request.GetBody()
+		if err != nil {
+			return nil, err
+		}
+		err = errors.Join(json.NewDecoder(body).Decode(&call), body.Close())
+		if err != nil {
+			return nil, err
+		}
+		request = request.Clone(request.Context())
+		if _, commandCapture := m.base.(*cliHTTPTransport); !commandCapture {
+			request.GetBody = nil
+		}
+	}
+	operation, _ := request.Context().Value(operationKey{}).(*clientOperation)
+	if call.Method == "tools/call" && operation != nil {
+		if err := operation.dispatch(); err != nil {
+			return nil, err
+		}
+	}
+	response, err := m.base.RoundTrip(request)
+	lost := err != nil || (response != nil && (response.StatusCode == http.StatusNotFound || response.StatusCode == http.StatusGone))
+	if lost {
+		m.mu.Lock()
+		m.lost = true
+		m.mu.Unlock()
+		if operation != nil {
+			operation.mu.Lock()
+			operation.lost = true
+			operation.mu.Unlock()
+		}
+	}
+	if err != nil {
+		return nil, fmt.Errorf("MCP relationship state lost; operation not replayed: %v", err)
+	}
+	if lost {
+		_ = response.Body.Close()
+		return nil, errors.New("MCP relationship state lost; previous remote state is unavailable")
+	}
+	return response, nil
+}
+
+func (m *managedHTTPTransport) stateLost() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.lost
+}
+
+func (o *ownedConnection) release(shutdown context.Context) {
+	o.releaseOnce.Do(func() {
+		o.transport.mu.Lock()
+		o.transport.shutdown = shutdown
+		o.transport.mu.Unlock()
+		if err := o.connection.Close(); err != nil {
+			o.transport.recordFailure(err)
+		}
+		o.cancel()
+		o.pool.CloseIdleConnections()
+	})
 }

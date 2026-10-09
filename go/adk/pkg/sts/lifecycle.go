@@ -2,7 +2,9 @@ package sts
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
+	"fmt"
 
 	"github.com/kagent-dev/kagent/go/adk/pkg/mcp"
 	"github.com/kagent-dev/kagent/go/adk/pkg/models"
@@ -51,4 +53,9 @@ func (a *lifecycleAuthority) Headers(ctx context.Context) (map[string]string, er
 		return nil, errLifecycleAuthorityUnavailable
 	}
 	return map[string]string{"Authorization": "Bearer " + entry.Token}, nil
+}
+
+// Identity describes the provider-authenticated subject rather than its token.
+func (a *lifecycleAuthority) Identity() string {
+	return fmt.Sprintf("sts:%x", sha256.Sum256([]byte(a.key.sessionID+"\x00"+a.key.subject)))
 }

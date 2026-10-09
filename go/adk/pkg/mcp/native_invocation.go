@@ -15,22 +15,34 @@ import (
 // It is carried only by active operations, never the retained connection.
 type invocationContextKey struct{}
 
-type nativeReadonlyContext struct{ adkagent.ReadonlyContext }
+type nativeReadonlyContext struct {
+	adkagent.ReadonlyContext
+	operation *clientOperation
+}
 
 var _ adkagent.ReadonlyContext = nativeReadonlyContext{}
 
 func (c nativeReadonlyContext) Value(key any) any {
+	if _, ok := key.(operationKey); ok && c.operation != nil {
+		return c.operation
+	}
 	if _, ok := key.(invocationContextKey); ok {
 		return c.ReadonlyContext
 	}
 	return c.ReadonlyContext.Value(key)
 }
 
-type nativeInvocationContext struct{ adkagent.Context }
+type nativeInvocationContext struct {
+	adkagent.Context
+	operation *clientOperation
+}
 
 var _ adkagent.Context = nativeInvocationContext{}
 
 func (c nativeInvocationContext) Value(key any) any {
+	if _, ok := key.(operationKey); ok {
+		return c.operation
+	}
 	if _, ok := key.(invocationContextKey); ok {
 		return c.Context
 	}
@@ -44,7 +56,7 @@ var _ tool.Toolset = (*nativeInvocationToolset)(nil)
 func (n *nativeInvocationToolset) Name() string { return n.inner.Name() }
 
 func (n *nativeInvocationToolset) Tools(ctx adkagent.ReadonlyContext) ([]tool.Tool, error) {
-	tools, err := n.inner.Tools(nativeReadonlyContext{ctx})
+	tools, err := n.inner.Tools(nativeReadonlyContext{ReadonlyContext: ctx})
 	if err != nil {
 		return nil, err
 	}
@@ -62,13 +74,19 @@ type nativeRunnableTool interface {
 	Run(adkagent.Context, any) (map[string]any, error)
 }
 
-type nativeInvocationTool struct{ nativeRunnableTool }
+type nativeInvocationTool struct {
+	nativeRunnableTool
+	scoped *scopedNativeToolset
+}
 
 var _ tool.Tool = (*nativeInvocationTool)(nil)
 var _ nativeRunnableTool = (*nativeInvocationTool)(nil)
 
 func (n *nativeInvocationTool) Run(ctx adkagent.Context, arguments any) (map[string]any, error) {
-	return n.nativeRunnableTool.Run(nativeInvocationContext{ctx}, arguments)
+	if n.scoped != nil {
+		return n.scoped.run(ctx, n.Name(), arguments)
+	}
+	return n.nativeRunnableTool.Run(nativeInvocationContext{Context: ctx, operation: &clientOperation{}}, arguments)
 }
 
 func (n *nativeInvocationTool) ProcessRequest(ctx adkagent.Context, request *model.LLMRequest) error {

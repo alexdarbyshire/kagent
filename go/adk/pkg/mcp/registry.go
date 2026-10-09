@@ -71,13 +71,15 @@ func allowedRequestHeaders(ctx context.Context, allowed []string) map[string]str
 // mcpServerParams groups connection parameters for an MCP server,
 // reducing parameter sprawl across createTransport / initializeToolSet.
 type mcpServerParams struct {
-	HTTPTransport         *http.Transport // optional caller-owned pool for bounded command lifetimes
-	Lifecycle             *ClientLifecycle
+	HTTPTransport         *http.Transport  `json:"-"` // optional caller-owned pool for bounded command lifetimes
+	Lifecycle             *ClientLifecycle `json:"-"`
+	BindingID             string
+	relationship          *clientRelationship
 	URL                   string
 	Headers               map[string]string
 	AllowedHeaders        []string              // header names to forward from incoming request
 	PropagateToken        bool                  // when true, Authorization is forwarded independently of AllowedHeaders
-	HeaderProvider        DynamicHeaderProvider // optional per-request headers derived from invocation context (e.g., STS exchanged access tokens)
+	HeaderProvider        DynamicHeaderProvider `json:"-"` // optional per-request headers derived from invocation context (e.g., STS exchanged access tokens)
 	ServerType            string                // "http" or "sse"
 	Command               string
 	Args                  []string
@@ -198,6 +200,7 @@ func addToolset(ctx context.Context, log *slog.Logger, params mcpServerParams, t
 		log.InfoContext(ctx, "adding MCP tool", "transport", label, "index", index, "url", params.URL, "tool_filter_count", "all")
 	}
 
+	params.BindingID = fmt.Sprintf("%s:%d", label, index)
 	ts, err := initializeToolSet(ctx, params, toolFilter)
 	if err != nil {
 		log.ErrorContext(ctx, "failed to fetch MCP tools", "transport", label, "error", err, "url", params.URL)
@@ -405,15 +408,16 @@ func initializeToolSet(ctx context.Context, params mcpServerParams, toolFilter m
 		}
 	}
 
-	cfg := mcptoolset.Config{
-		Transport: mcpTransport,
+	if params.Lifecycle != nil && (params.ServerType == "http" || params.ServerType == "sse") {
+		return &mcpAppToolset{inner: &scopedNativeToolset{params: params, predicate: toolPredicate, binding: bindingIdentity(struct {
+			Params mcpServerParams
+			Filter map[string]bool
+		}{params, toolFilter})}, appToolNames: appToolNames}, nil
 	}
-
-	toolset, err := mcptoolset.New(cfg)
+	toolset, err := mcptoolset.New(mcptoolset.Config{Transport: mcpTransport})
 	if err != nil {
-		return nil, fmt.Errorf("failed to create MCP toolset for %s: %w", params.URL, err)
+		return nil, err
 	}
-
 	visibleTools := tool.Toolset(toolset)
 	if toolPredicate != nil {
 		visibleTools = tool.FilterToolset(toolset, toolPredicate)
