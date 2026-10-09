@@ -42,7 +42,7 @@ func PrepareCLIEnvironment(owner context.Context, bindings []adk.MCPCLIConfig, p
 		}
 		resolvers[binding.Name] = &headerRoundTripper{headers: headers, allowedHeaders: allowed, propagateToken: propagateToken, headerProvider: provider}
 	}
-	commands := &cliCommandRuntime{ctx: owner, lifecycle: ownerLifecycle, bindings: make(map[string]adk.MCPCLIConfig), resolvers: resolvers, sessions: make(map[cliSessionKey]*cliCommandSession)}
+	commands := &cliCommandRuntime{ctx: owner, lifecycle: ownerLifecycle, bindings: make(map[string]adk.MCPCLIConfig), resolvers: resolvers}
 	for _, binding := range bindings {
 		commands.bindings[binding.Name] = binding
 	}

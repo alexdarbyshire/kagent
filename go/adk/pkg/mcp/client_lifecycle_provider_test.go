@@ -94,10 +94,12 @@ func TestRunnerProviderAuthorityAuthenticatesOwnedShutdown(t *testing.T) {
 				var mu sync.Mutex
 				var calledSession, terminatedSession, deleteAuthority string
 				var callAuthority string
+				var callSessions []string
 				server := mcpsdk.NewServer(&mcpsdk.Implementation{Name: "owned", Version: "1"}, nil)
 				server.AddTool(&mcpsdk.Tool{Name: "read", InputSchema: json.RawMessage(`{"type":"object","additionalProperties":false}`)}, func(_ context.Context, r *mcpsdk.CallToolRequest) (*mcpsdk.CallToolResult, error) {
 					mu.Lock()
 					calledSession = r.Session.ID()
+					callSessions = append(callSessions, calledSession)
 					mu.Unlock()
 					return &mcpsdk.CallToolResult{Content: []mcpsdk.Content{&mcpsdk.TextContent{Text: "authenticated action"}}}, nil
 				})
@@ -195,19 +197,24 @@ func TestRunnerProviderAuthorityAuthenticatesOwnedShutdown(t *testing.T) {
 				require.NoError(t, err)
 				_, err = sessions.Create(t.Context(), &session.CreateRequest{AppName: "provider-shutdown", UserID: "alice", SessionID: "conversation"})
 				require.NoError(t, err)
-				invocation, end := context.WithCancel(context.WithValue(t.Context(), models.BearerTokenKey, "caller"))
-				defer end()
-				var text strings.Builder
-				for event, err := range runner.Run(invocation, "alice", "conversation", genai.NewContentFromText("read", "user"), adkagent.RunConfig{}) {
-					require.NoError(t, err)
-					if event.Content != nil {
-						for _, part := range event.Content.Parts {
-							text.WriteString(part.Text)
+				for range 2 {
+					invocation, end := context.WithCancel(context.WithValue(t.Context(), models.BearerTokenKey, "caller"))
+					var text strings.Builder
+					for event, err := range runner.Run(invocation, "alice", "conversation", genai.NewContentFromText("read", "user"), adkagent.RunConfig{}) {
+						require.NoError(t, err)
+						if event.Content != nil {
+							for _, part := range event.Content.Parts {
+								text.WriteString(part.Text)
+							}
 						}
 					}
+					require.Contains(t, text.String(), "finished")
+					end()
 				}
-				require.Contains(t, text.String(), "finished")
-				end()
+				mu.Lock()
+				require.Len(t, callSessions, 2)
+				require.Equal(t, callSessions[0], callSessions[1], "fresh same-subject invocations retain provider-scoped custody")
+				mu.Unlock()
 				mu.Lock()
 				called, auth, terminated := calledSession, callAuthority, terminatedSession
 				mu.Unlock()

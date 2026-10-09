@@ -223,7 +223,7 @@ func createGoogleADKAgent(ctx context.Context, agentConfig *adk.AgentConfig, age
 		"tools_count", len(llmAgentConfig.Tools),
 		"toolsets_count", len(llmAgentConfig.Toolsets))
 
-	return llmAgent, nil
+	return mcp.WithCallerScope(llmAgent), nil
 }
 
 // usesRawOutputSchema reports whether the kagent provider adapter has a native

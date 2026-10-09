@@ -31,34 +31,11 @@ type cliCommandResponse struct {
 
 type cliCommandContextKey struct{}
 
-type cliScopeContext interface {
-	context.Context
-	AppName() string
-	UserID() string
-	SessionID() string
-	AgentName() string
-	Branch() string
-	IsolationScope() string
-}
-
-type cliSessionKey struct {
-	app, user, session, agent, branch, isolation, binding string
-}
-
-type cliCommandSession struct {
-	gate    chan struct{}
-	remote  *cliRemoteSession
-	headers *cliCommandHeaders
-}
-
 type cliCommandRuntime struct {
 	ctx       context.Context
 	lifecycle *ClientLifecycle
 	bindings  map[string]adk.MCPCLIConfig
 	resolvers map[string]*headerRoundTripper
-	mu        sync.Mutex
-	sessions  map[cliSessionKey]*cliCommandSession
-	closed    bool
 }
 
 // cliCommandHeaders holds the current invocation only during a serialized command.
@@ -119,68 +96,57 @@ func (c *cliCommandRuntime) run(ctx, invocation context.Context, name string, re
 	if !ok {
 		return cliCommandResponse{Error: "unknown MCP invocation binding"}
 	}
-	scope, ok := invocation.(cliScopeContext)
-	if !ok || scope.AppName() == "" || scope.UserID() == "" || scope.SessionID() == "" || scope.AgentName() == "" {
-		return cliCommandResponse{Error: "MCP command requires the original scoped agent context"}
+	key, err := c.lifecycle.scopeKey(invocation, name+bindingIdentity(binding), "command", c.resolvers[name])
+	if err != nil {
+		return cliCommandResponse{Error: err.Error()}
 	}
-	key := cliSessionKey{app: scope.AppName(), user: scope.UserID(), session: scope.SessionID(), agent: scope.AgentName(), branch: scope.Branch(), isolation: scope.IsolationScope(), binding: name}
-	c.mu.Lock()
-	if c.closed {
-		c.mu.Unlock()
-		return cliCommandResponse{Error: "MCP command runtime stopped"}
+	session, err := c.lifecycle.relationship(key)
+	if err != nil {
+		return cliCommandResponse{Error: err.Error()}
 	}
-	session := c.sessions[key]
-	if session == nil {
-		session = &cliCommandSession{gate: make(chan struct{}, 1), headers: &cliCommandHeaders{resolver: c.resolvers[name], lifecycle: c.lifecycle}}
-		c.sessions[key] = session
+	release, err := c.lifecycle.acquire(ctx, session)
+	if err != nil {
+		return cliCommandResponse{Error: err.Error()}
 	}
-	c.mu.Unlock()
-	select {
-	case session.gate <- struct{}{}:
-	case <-ctx.Done():
-		return cliCommandResponse{Error: ctx.Err().Error()}
-	case <-c.ctx.Done():
-		return cliCommandResponse{Error: "MCP command runtime stopped"}
-	}
-	defer func() { <-session.gate }()
-	if err := c.ctx.Err(); err != nil {
-		return cliCommandResponse{Error: "MCP command runtime stopped"}
+	defer release()
+	if session.headers == nil {
+		session.headers = &cliCommandHeaders{resolver: c.resolvers[name], lifecycle: c.lifecycle}
 	}
 	session.headers.bind(invocation)
 	defer session.headers.release()
-	var err error
-	if session.remote == nil {
+	if session.command == nil {
 		// Cancel incomplete initialization with this call, then detach the healthy
 		// connection from the invocation without retaining its context.
 		connection, cancelConnection := context.WithCancel(c.ctx)
 		stopInitialization := context.AfterFunc(ctx, cancelConnection)
-		session.remote, err = openCLISession(connection, binding, session.headers)
+		session.command, err = openCLISession(connection, binding, session.headers)
 		stopInitialization()
 		if err != nil {
 			cancelConnection()
 		} else {
-			cancelRemote := session.remote.cancel
-			session.remote.cancel = func() { cancelRemote(); cancelConnection() }
+			cancelRemote := session.command.cancel
+			session.command.cancel = func() { cancelRemote(); cancelConnection() }
 		}
 	}
 	var output bytes.Buffer
 	if err == nil {
 		// Reset captured wire state between commands, without changing session identity.
-		session.remote.lifecycle.reset()
-		err = runCLICommand(context.WithValue(ctx, cliCommandContextKey{}, invocation), binding, request.Args, io.NopCloser(bytes.NewReader(request.Input)), &output, session.remote)
+		session.command.lifecycle.reset()
+		err = runCLICommand(context.WithValue(context.WithValue(ctx, operationKey{}, &clientOperation{}), cliCommandContextKey{}, invocation), binding, request.Args, io.NopCloser(bytes.NewReader(request.Input)), &output, session.command)
 	}
 	response := cliCommandResponse{Output: output.String()}
 	if err != nil {
 		response.Error = err.Error()
+		if session.command != nil && session.command.managed.stateLost() {
+			_ = session.command.Close()
+			session.command = nil
+			response.Error = "MCP relationship state lost; operation not replayed: " + response.Error
+		}
 	}
 	return response
 }
 
 func (c *cliCommandRuntime) close() {
-	c.mu.Lock()
-	c.closed = true
-	c.sessions = nil
-	c.mu.Unlock()
 	c.lifecycle.Close()
 }
 

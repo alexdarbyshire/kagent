@@ -60,5 +60,5 @@ Every returned outcome also records local release and, when available, the HTTP
 status. SDK Close returning nil does not prove remote acceptance. MCP termination
 does not establish deletion of browser tabs or other domain resources.
 
-This change provides managed authority and shutdown. Scope-aware continuity,
-relationship recovery, and mutation-replay prevention remain separate work.
+[Scoped client continuity](mcp-client-continuity.md) adds shared caller ownership,
+explicit relationship loss, and mutation replay prevention for both presentations.
