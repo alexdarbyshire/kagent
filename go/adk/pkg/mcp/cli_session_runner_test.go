@@ -63,7 +63,7 @@ func testRunnerScopedBrowser(t *testing.T, cli bool) {
 		}
 		handler.ServeHTTP(w, request)
 	}))
-	defer remote.Close()
+	t.Cleanup(remote.Close)
 	run, cancel := newBrowserRunnerFixture(t, cli, remote.URL)
 	require.Contains(t, run("alice", "create"), "owned browser tab")
 	require.Contains(t, run("alice", "read"), "owned browser tab", "a new native invocation retains its connection")
