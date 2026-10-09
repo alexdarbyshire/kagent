@@ -182,12 +182,11 @@ func TestMCPCLIRunnerA2ACallerAndSTSIsolationAcrossSharedAgents(t *testing.T) {
 				seen[key] = true
 				require.Contains(t, []string{"alice", "bob"}, call.user)
 				prefix := "incoming-"
-				if exchange && call.name == "cli_record" {
+				if exchange {
 					prefix = "exchanged-"
 				}
-				// Native SDK request contexts currently lose ADK's SessionID
-				// method and retain the propagated caller token, even after STS
-				// exchange. The CLI handoff deliberately preserves that method.
+				// Both presentations preserve the original ADK context, so
+				// provider authority overrides propagated caller credentials.
 				require.Equal(t, "Bearer "+prefix+call.user, call.authorization, key)
 				require.Equal(t, call.scope+"-"+call.user, call.allowed)
 				require.Equal(t, "static", call.order)

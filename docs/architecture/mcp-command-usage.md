@@ -180,6 +180,16 @@ compiled bindings. Suspend/resume restores commands from those inputs and the
 pinned image; remote catalogs and schemas remain live and are not frozen by
 revision pinning.
 
+Commands invoked through native Bash share an actor-owned MCP connection for
+the same application, user, Session, agent, branch and isolation scope. Separate
+command processes and follow-up invocations therefore retain browser ownership.
+The invocation socket supplies the current caller context; a command cannot
+choose a scope, endpoint or credentials. Each remote request resolves current
+invocation headers. Different callers and agent scopes use separate connections.
+Actor shutdown closes retained connections. An expired or lost remote session
+is an explicit error; commands do not replay actions or recover old browser tabs.
+Actor replacement or suspend/resume starts fresh remote sessions.
+
 `requireApproval: true` together with CLI exposure fails preparation, including
 Shared children. Keep protected bindings native. Command visibility and tool
 selection are presentation controls; endpoint/gateway authorization, Substrate

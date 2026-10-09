@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/kagent-dev/kagent/go/api/adk"
+	"github.com/kagent-dev/kagent/go/pkg/logging"
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	schemaValidator "github.com/santhosh-tekuri/jsonschema/v6"
@@ -48,33 +49,81 @@ func RunCLI(ctx context.Context, args []string, stdin io.Reader, stdout io.Write
 	if binding.Name == "" {
 		return errors.New("MCP binding requires a command name")
 	}
-	if err := binding.ValidateTransport(); err != nil {
+	args = args[2:]
+	if socket := cliCommandSocket(); socket != "" {
+		return runActorCLI(ctx, socket, binding.Name, args, stdin, stdout)
+	}
+	remote, err := openCLISession(ctx, binding, nil)
+	if err != nil {
 		return err
 	}
-	params, selectedTools, requireApproval := cliConnection(binding)
+	defer func() { err = errors.Join(err, remote.Close()) }()
+	return runCLICommand(ctx, binding, args, stdin, stdout, remote)
+}
+
+// cliRemoteSession owns transport resources independently of a command process.
+type cliRemoteSession struct {
+	session   *mcpsdk.ClientSession
+	lifecycle *cliHTTPTransport
+	pool      *http.Transport
+	cancel    context.CancelFunc
+	timeout   time.Duration
+	managed   *managedHTTPTransport
+}
+
+func (c *cliRemoteSession) Close() error {
+	var err error
+	if c.session != nil {
+		err = c.session.Close()
+	}
+	c.cancel()
+	c.pool.CloseIdleConnections()
+	if c.managed != nil {
+		if err != nil {
+			c.managed.recordFailure(err)
+		}
+		outcome := c.managed.outcome()
+		if outcome.Status == "not_attempted" {
+			outcome.Status = "no_session"
+			if c.managed.legacySSE {
+				outcome.Status = "unsupported_transport"
+			}
+		}
+		if outcome.Status != "accepted" && outcome.Status != "no_session" && outcome.Status != "unsupported_transport" {
+			logging.FromContext(context.Background()).Warn("MCP command termination outcome", "endpoint", outcome.Endpoint, "status", outcome.Status, "http_status", outcome.HTTPStatus)
+		}
+	}
+	return err
+}
+
+func openCLISession(ctx context.Context, binding cliBinding, headers *cliCommandHeaders) (_ *cliRemoteSession, err error) {
+	if err := binding.ValidateTransport(); err != nil {
+		return nil, err
+	}
+	params, _, requireApproval := cliConnection(binding)
 	if requireApproval {
-		return errors.New("MCP CLI does not support require_approval: true; retain native MCP exposure")
+		return nil, errors.New("MCP CLI does not support require_approval: true; retain native MCP exposure")
 	}
 	endpoint, err := url.Parse(params.URL)
 	if err != nil || (endpoint.Scheme != "http" && endpoint.Scheme != "https") || endpoint.Host == "" || endpoint.User != nil || endpoint.Fragment != "" {
-		return errors.New("MCP binding requires an HTTP endpoint")
+		return nil, errors.New("MCP binding requires an HTTP endpoint")
 	}
 	if params.ServerType == "http" && params.SseReadTimeout != nil {
-		return errors.New("MCP CLI HTTP sse_read_timeout is unsupported")
+		return nil, errors.New("MCP CLI HTTP sse_read_timeout is unsupported")
 	}
 	if binding.SSE == nil && binding.HTTP.Params.TerminateOnClose != nil && !*binding.HTTP.Params.TerminateOnClose {
-		return errors.New("MCP CLI requires terminate_on_close to close session resources")
+		return nil, errors.New("MCP CLI requires terminate_on_close to close session resources")
 	}
 	if params.TLSDisableSystemCAs != nil && *params.TLSDisableSystemCAs && (params.TLSCACertPath == nil || *params.TLSCACertPath == "") {
-		return errors.New("tls_disable_system_cas requires tls_ca_cert_path")
+		return nil, errors.New("tls_disable_system_cas requires tls_ca_cert_path")
 	}
 	if params.SseReadTimeout != nil && (*params.SseReadTimeout <= 0 || math.IsInf(*params.SseReadTimeout, 0) || math.IsNaN(*params.SseReadTimeout) || *params.SseReadTimeout >= float64(math.MaxInt64)/float64(time.Second)) {
-		return errors.New("MCP SSE read timeout must be positive and finite")
+		return nil, errors.New("MCP SSE read timeout must be positive and finite")
 	}
 	timeout := defaultTimeout
 	if params.Timeout != nil {
 		if *params.Timeout <= 0 || math.IsInf(*params.Timeout, 0) || math.IsNaN(*params.Timeout) || *params.Timeout >= float64(math.MaxInt64)/float64(time.Second) {
-			return errors.New("MCP timeout must be positive")
+			return nil, errors.New("MCP timeout must be positive")
 		}
 		timeout = time.Duration(*params.Timeout * float64(time.Second))
 	}
@@ -83,14 +132,26 @@ func RunCLI(ctx context.Context, args []string, stdin io.Reader, stdout io.Write
 		// The command budget must not cut that stream off earlier.
 		timeout = max(timeout, time.Duration(*params.SseReadTimeout*float64(time.Second)))
 	}
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
+	var cancel context.CancelFunc
+	if headers == nil {
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+	} else {
+		// A retained SSE stream belongs to the actor, not its first command's deadline.
+		ctx, cancel = context.WithCancel(ctx)
+	}
+
 	pool := &http.Transport{}
-	defer pool.CloseIdleConnections()
+	remoteSession := &cliRemoteSession{pool: pool, cancel: cancel, timeout: timeout}
+	defer func() {
+		if err != nil {
+			err = errors.Join(err, remoteSession.Close())
+		}
+	}()
+
 	params.HTTPTransport = pool
 	transport, err := createTransport(ctx, params)
 	if err != nil {
-		return fmt.Errorf("failed to create MCP transport: %w", err)
+		return nil, fmt.Errorf("failed to create MCP transport: %w", err)
 	}
 	var httpClient *http.Client
 	switch remote := transport.(type) {
@@ -103,18 +164,51 @@ func RunCLI(ctx context.Context, args []string, stdin io.Reader, stdout io.Write
 		httpClient = remote.HTTPClient
 	}
 	httpClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	invocation, err := cliInvocationTransport(httpClient.Transport, binding)
-	if err != nil {
-		return err
+	invocation := httpClient.Transport
+	if headers != nil {
+		headers.base = invocation
+		invocation = headers
+	} else {
+		invocation, err = cliInvocationTransport(invocation, binding)
+		if err != nil {
+			return nil, err
+		}
 	}
 	lifecycle := &cliHTTPTransport{base: invocation, endpoint: endpoint, legacySSE: binding.SSE != nil}
 	httpClient.Transport = lifecycle
+	resolver := &headerRoundTripper{headers: params.Headers, allowedHeaders: params.AllowedHeaders}
+	var provider LifecycleAuthorityProvider
+	if headers != nil {
+		resolver = headers.resolver
+		provider = headers.lifecycle.provider
+	}
+	managed := &managedHTTPTransport{base: lifecycle, resolver: resolver, provider: provider, endpoint: params.URL, legacySSE: binding.SSE != nil, commandHeaders: headers}
+	if headers != nil {
+		headers.mu.Lock()
+		managed.capture(headers.invocation)
+		headers.mu.Unlock()
+	}
+	httpClient.Transport = managed
+	remoteSession.managed = managed
 	client := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "kagent-mcp-cli", Version: "1"}, &mcpsdk.ClientOptions{Capabilities: &mcpsdk.ClientCapabilities{}, MultiRoundTrip: &mcpsdk.MultiRoundTripOptions{Disabled: true}})
+	if headers != nil {
+		transport = &registeredTransport{inner: transport, owner: headers.lifecycle, managed: managed, pool: pool, cancel: cancel}
+	}
 	session, err := client.Connect(ctx, transport, nil)
 	if err != nil {
-		return fmt.Errorf("failed to connect MCP command %s: %w", binding.Name, lifecycle.connectionError(err))
+		return nil, fmt.Errorf("failed to connect MCP command %s: %w", binding.Name, lifecycle.connectionError(err))
 	}
-	defer func() { err = errors.Join(err, session.Close()) }()
+
+	remoteSession.session, remoteSession.lifecycle = session, lifecycle
+	return remoteSession, nil
+}
+
+func runCLICommand(ctx context.Context, binding cliBinding, args []string, stdin io.Reader, stdout io.Writer, remote *cliRemoteSession) error {
+	ctx, cancel := context.WithTimeout(ctx, remote.timeout)
+	defer cancel()
+	var err error
+	session, lifecycle := remote.session, remote.lifecycle
+	_, selectedTools, _ := cliConnection(binding)
 	var tools []*mcpsdk.Tool
 	for tool, err := range session.Tools(ctx, nil) {
 		if err != nil {
@@ -124,7 +218,6 @@ func RunCLI(ctx context.Context, args []string, stdin io.Reader, stdout io.Write
 			tools = append(tools, tool)
 		}
 	}
-	args = args[2:]
 	if len(args) == 0 || (len(args) == 1 && args[0] == "--help") {
 		var help strings.Builder
 		fmt.Fprintf(&help, "%s: MCP tools\nUsage: %s TOOL --property value | --input-file PATH|-\n", binding.Name, binding.Name)
@@ -389,6 +482,21 @@ type cliHTTPTransport struct {
 }
 
 var _ http.RoundTripper = (*cliHTTPTransport)(nil)
+
+func (c *cliHTTPTransport) reset() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.resultBody = nil
+	c.catalogBodies = nil
+	c.resultID = nil
+	c.catalogIDs = nil
+	c.transportErr = nil
+	if c.streamBody != nil {
+		c.streamBody.mu.Lock()
+		c.streamBody.data.Reset()
+		c.streamBody.mu.Unlock()
+	}
+}
 
 func (c *cliHTTPTransport) RoundTrip(request *http.Request) (*http.Response, error) {
 	if c.legacySSE && (request.URL.Scheme != c.endpoint.Scheme || !strings.EqualFold(request.URL.Host, c.endpoint.Host) || request.URL.User != nil) {

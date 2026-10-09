@@ -46,6 +46,8 @@ type TokenCacheEntry struct {
 	evictAfter int64
 	// useSeq orders the capacity bounds. It is a sequence number, not a time.
 	useSeq uint64
+	// custodyID distinguishes replacement entries from an evicted authority.
+	custodyID uint64
 }
 
 // HasExpired checks if the token has expired or will expire soon.
@@ -76,7 +78,8 @@ type TokenPropagationPlugin struct {
 	mu              sync.RWMutex
 	logger          *slog.Logger
 	bufferSeconds   int64
-	uses            uint64   // monotonic use counter, read by touch
+	uses            uint64 // monotonic use counter, read by touch
+	custodyIDs      uint64
 	resource        []string // RFC 8707 resource indicators sent on the STS exchange; empty omits them
 	audience        []string // RFC 8693 audiences sent on the STS exchange; empty omits them
 }
@@ -255,7 +258,8 @@ func (p *TokenPropagationPlugin) setCachedToken(sessionID, subject, token string
 
 	// evictAfter defaults to Expiry; touch supplies the synthetic bound when
 	// nothing states an expiry, so every entry stays evictable.
-	entry := &TokenCacheEntry{Token: token, Expiry: expiry, evictAfter: expiry}
+	p.custodyIDs++
+	entry := &TokenCacheEntry{Token: token, Expiry: expiry, evictAfter: expiry, custodyID: p.custodyIDs}
 	p.tokenCache[cacheKey{sessionID: sessionID, subject: subject}] = entry
 	p.touch(entry)
 
