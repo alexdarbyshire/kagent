@@ -37,7 +37,7 @@ func (n *scopedNativeToolset) selectRelationship(ctx adkagent.ReadonlyContext) (
 		params.relationship = owned
 		transport, err := createManagedTransport(ctx, params)
 		if err == nil {
-			owned.native, err = mcptoolset.New(mcptoolset.Config{Transport: transport})
+			owned.native, err = mcptoolset.New(mcptoolset.Config{Transport: transport, Client: nativeResultClient(n.params.Lifecycle.running)})
 		}
 		if err != nil {
 			release()

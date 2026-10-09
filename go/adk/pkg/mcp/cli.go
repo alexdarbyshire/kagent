@@ -279,6 +279,10 @@ func runCLICommand(ctx context.Context, binding cliBinding, args []string, stdin
 	if err != nil {
 		return fmt.Errorf("failed to preserve MCP result: %w", err)
 	}
+	resultData, err = transformResult(ctx, resultData)
+	if err != nil {
+		return fmt.Errorf("adapt MCP result (operation not replayed): %w", err)
+	}
 	if err := json.NewEncoder(stdout).Encode(json.RawMessage(resultData)); err != nil {
 		return fmt.Errorf("failed to write MCP result: %w", err)
 	}
