@@ -61,6 +61,9 @@ type ownedConnection struct {
 // NewClientLifecycle attaches bounded shared teardown to the host's lifetime.
 func NewClientLifecycle(host context.Context, provider LifecycleAuthorityProvider) *ClientLifecycle {
 	running, stop := context.WithCancel(context.Background())
+	if transform, ok := host.Value(resultTransformerKey{}).(ResultTransformer); ok {
+		running = WithResultTransformer(running, transform)
+	}
 	owner := &ClientLifecycle{provider: provider, running: running, stop: stop}
 	context.AfterFunc(host, func() {
 		for _, outcome := range owner.Close() {

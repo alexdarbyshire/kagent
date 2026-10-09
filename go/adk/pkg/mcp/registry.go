@@ -414,7 +414,7 @@ func initializeToolSet(ctx context.Context, params mcpServerParams, toolFilter m
 			Filter map[string]bool
 		}{params, toolFilter})}, appToolNames: appToolNames}, nil
 	}
-	toolset, err := mcptoolset.New(mcptoolset.Config{Transport: mcpTransport})
+	toolset, err := mcptoolset.New(mcptoolset.Config{Transport: mcpTransport, Client: nativeResultClient(ctx)})
 	if err != nil {
 		return nil, err
 	}

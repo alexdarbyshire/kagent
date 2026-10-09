@@ -90,6 +90,9 @@ func (c *cliCommandHeaders) release() {
 
 func (c *cliCommandRuntime) run(ctx, invocation context.Context, name string, request cliCommandRequest) cliCommandResponse {
 	ctx, cancel := context.WithCancel(ctx)
+	if transform, ok := c.ctx.Value(resultTransformerKey{}).(ResultTransformer); ok {
+		ctx = WithResultTransformer(ctx, transform)
+	}
 	stop := context.AfterFunc(c.ctx, cancel)
 	defer func() { stop(); cancel() }()
 	binding, ok := c.bindings[name]
