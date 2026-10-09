@@ -200,7 +200,7 @@ func normalizeVisibility(value any) []string {
 // Classification must happen here because MCP Apps metadata lives on
 // mcpsdk.Tool.Meta, which ADK mcptoolset drops when converting to tool.Tool.
 func agentVisibleToolFilter(ctx context.Context, params mcpServerParams, configuredFilter map[string]bool) (tool.Predicate, map[string]bool, error) {
-	mcpTransport, err := createTransport(ctx, params)
+	mcpTransport, err := createManagedTransport(ctx, params)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create transport for %s: %w", params.URL, err)
 	}

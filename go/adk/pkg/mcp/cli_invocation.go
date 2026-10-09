@@ -26,7 +26,14 @@ const cliInvocationSocket = "KAGENT_MCP_CLI_INVOCATION_SOCKET"
 // PrepareCLIEnvironment owns MCP command sessions for the actor's lifetime.
 // Each execution hook binds its private socket to the original agent context;
 // command execution only installs the returned environment.
-func PrepareCLIEnvironment(owner context.Context, bindings []adk.MCPCLIConfig, propagateToken bool, provider DynamicHeaderProvider) func(context.Context, context.Context) ([]string, func(), error) {
+func PrepareCLIEnvironment(owner context.Context, bindings []adk.MCPCLIConfig, propagateToken bool, provider DynamicHeaderProvider, lifecycles ...*ClientLifecycle) func(context.Context, context.Context) ([]string, func(), error) {
+	var ownerLifecycle *ClientLifecycle
+	if len(lifecycles) > 0 {
+		ownerLifecycle = lifecycles[0]
+	}
+	if ownerLifecycle == nil {
+		ownerLifecycle = NewClientLifecycle(owner, nil)
+	}
 	resolvers := make(map[string]*headerRoundTripper, len(bindings))
 	for _, binding := range bindings {
 		headers, allowed := binding.HTTP.Params.Headers, binding.HTTP.AllowedHeaders
@@ -35,7 +42,7 @@ func PrepareCLIEnvironment(owner context.Context, bindings []adk.MCPCLIConfig, p
 		}
 		resolvers[binding.Name] = &headerRoundTripper{headers: headers, allowedHeaders: allowed, propagateToken: propagateToken, headerProvider: provider}
 	}
-	commands := &cliCommandRuntime{ctx: owner, bindings: make(map[string]adk.MCPCLIConfig), resolvers: resolvers, sessions: make(map[cliSessionKey]*cliCommandSession)}
+	commands := &cliCommandRuntime{ctx: owner, lifecycle: ownerLifecycle, bindings: make(map[string]adk.MCPCLIConfig), resolvers: resolvers, sessions: make(map[cliSessionKey]*cliCommandSession)}
 	for _, binding := range bindings {
 		commands.bindings[binding.Name] = binding
 	}

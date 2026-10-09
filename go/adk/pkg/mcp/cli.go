@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/kagent-dev/kagent/go/api/adk"
+	"github.com/kagent-dev/kagent/go/pkg/logging"
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	schemaValidator "github.com/santhosh-tekuri/jsonschema/v6"
@@ -67,6 +68,7 @@ type cliRemoteSession struct {
 	pool      *http.Transport
 	cancel    context.CancelFunc
 	timeout   time.Duration
+	managed   *managedHTTPTransport
 }
 
 func (c *cliRemoteSession) Close() error {
@@ -76,6 +78,21 @@ func (c *cliRemoteSession) Close() error {
 	}
 	c.cancel()
 	c.pool.CloseIdleConnections()
+	if c.managed != nil {
+		if err != nil {
+			c.managed.recordFailure(err)
+		}
+		outcome := c.managed.outcome()
+		if outcome.Status == "not_attempted" {
+			outcome.Status = "no_session"
+			if c.managed.legacySSE {
+				outcome.Status = "unsupported_transport"
+			}
+		}
+		if outcome.Status != "accepted" && outcome.Status != "no_session" && outcome.Status != "unsupported_transport" {
+			logging.FromContext(context.Background()).Warn("MCP command termination outcome", "endpoint", outcome.Endpoint, "status", outcome.Status, "http_status", outcome.HTTPStatus)
+		}
+	}
 	return err
 }
 
@@ -159,7 +176,24 @@ func openCLISession(ctx context.Context, binding cliBinding, headers *cliCommand
 	}
 	lifecycle := &cliHTTPTransport{base: invocation, endpoint: endpoint, legacySSE: binding.SSE != nil}
 	httpClient.Transport = lifecycle
+	resolver := &headerRoundTripper{headers: params.Headers, allowedHeaders: params.AllowedHeaders}
+	var provider LifecycleAuthorityProvider
+	if headers != nil {
+		resolver = headers.resolver
+		provider = headers.lifecycle.provider
+	}
+	managed := &managedHTTPTransport{base: lifecycle, resolver: resolver, provider: provider, endpoint: params.URL, legacySSE: binding.SSE != nil, commandHeaders: headers}
+	if headers != nil {
+		headers.mu.Lock()
+		managed.capture(headers.invocation)
+		headers.mu.Unlock()
+	}
+	httpClient.Transport = managed
+	remoteSession.managed = managed
 	client := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "kagent-mcp-cli", Version: "1"}, &mcpsdk.ClientOptions{Capabilities: &mcpsdk.ClientCapabilities{}, MultiRoundTrip: &mcpsdk.MultiRoundTripOptions{Disabled: true}})
+	if headers != nil {
+		transport = &registeredTransport{inner: transport, owner: headers.lifecycle, managed: managed, pool: pool, cancel: cancel}
+	}
 	session, err := client.Connect(ctx, transport, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect MCP command %s: %w", binding.Name, lifecycle.connectionError(err))

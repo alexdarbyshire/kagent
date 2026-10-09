@@ -15,7 +15,6 @@ import (
 	"sync"
 
 	"github.com/kagent-dev/kagent/go/api/adk"
-	"github.com/kagent-dev/kagent/go/pkg/logging"
 	"go.opentelemetry.io/otel/propagation"
 )
 
@@ -54,6 +53,7 @@ type cliCommandSession struct {
 
 type cliCommandRuntime struct {
 	ctx       context.Context
+	lifecycle *ClientLifecycle
 	bindings  map[string]adk.MCPCLIConfig
 	resolvers map[string]*headerRoundTripper
 	mu        sync.Mutex
@@ -68,11 +68,15 @@ type cliCommandHeaders struct {
 	resolver   *headerRoundTripper
 	mu         sync.Mutex
 	invocation context.Context
+	lifecycle  *ClientLifecycle
 }
 
 var _ http.RoundTripper = (*cliCommandHeaders)(nil)
 
 func (c *cliCommandHeaders) RoundTrip(request *http.Request) (*http.Response, error) {
+	if request.Method == http.MethodDelete {
+		return c.base.RoundTrip(request)
+	}
 	invocation, ok := request.Context().Value(cliCommandContextKey{}).(context.Context)
 	if !ok {
 		// Initialization has the actor context so a retained SSE stream cannot
@@ -127,7 +131,7 @@ func (c *cliCommandRuntime) run(ctx, invocation context.Context, name string, re
 	}
 	session := c.sessions[key]
 	if session == nil {
-		session = &cliCommandSession{gate: make(chan struct{}, 1), headers: &cliCommandHeaders{resolver: c.resolvers[name]}}
+		session = &cliCommandSession{gate: make(chan struct{}, 1), headers: &cliCommandHeaders{resolver: c.resolvers[name], lifecycle: c.lifecycle}}
 		c.sessions[key] = session
 	}
 	c.mu.Unlock()
@@ -175,18 +179,9 @@ func (c *cliCommandRuntime) run(ctx, invocation context.Context, name string, re
 func (c *cliCommandRuntime) close() {
 	c.mu.Lock()
 	c.closed = true
-	sessions := c.sessions
 	c.sessions = nil
 	c.mu.Unlock()
-	for _, session := range sessions {
-		session.gate <- struct{}{}
-		if session.remote != nil {
-			if err := session.remote.Close(); err != nil {
-				logging.FromContext(c.ctx).ErrorContext(c.ctx, "failed to close MCP command session", "error", err)
-			}
-		}
-		<-session.gate
-	}
+	c.lifecycle.Close()
 }
 
 func cliCommandSocket() string {

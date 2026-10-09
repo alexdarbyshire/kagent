@@ -72,6 +72,7 @@ func allowedRequestHeaders(ctx context.Context, allowed []string) map[string]str
 // reducing parameter sprawl across createTransport / initializeToolSet.
 type mcpServerParams struct {
 	HTTPTransport         *http.Transport // optional caller-owned pool for bounded command lifetimes
+	Lifecycle             *ClientLifecycle
 	URL                   string
 	Headers               map[string]string
 	AllowedHeaders        []string              // header names to forward from incoming request
@@ -107,7 +108,15 @@ func CreateToolsets(
 	stdioTools []adk.StdioMcpServerConfig,
 	propagateToken bool,
 	headerProvider DynamicHeaderProvider,
+	lifecycles ...*ClientLifecycle,
 ) []tool.Toolset {
+	var owner *ClientLifecycle
+	if len(lifecycles) > 0 {
+		owner = lifecycles[0]
+	}
+	if owner == nil {
+		owner = NewClientLifecycle(ctx, nil)
+	}
 	log := logging.FromContext(ctx)
 	var toolsets []tool.Toolset
 
@@ -131,6 +140,7 @@ func CreateToolsets(
 			AllowedHeaders:        httpTool.AllowedHeaders,
 			PropagateToken:        propagateToken,
 			HeaderProvider:        headerProvider,
+			Lifecycle:             owner,
 			ServerType:            "http",
 			Timeout:               httpTool.Params.Timeout,
 			SseReadTimeout:        httpTool.Params.SseReadTimeout,
@@ -153,6 +163,7 @@ func CreateToolsets(
 			AllowedHeaders:        sseTool.AllowedHeaders,
 			PropagateToken:        propagateToken,
 			HeaderProvider:        headerProvider,
+			Lifecycle:             owner,
 			ServerType:            "sse",
 			Timeout:               sseTool.Params.Timeout,
 			SseReadTimeout:        sseTool.Params.SseReadTimeout,
@@ -319,13 +330,16 @@ type headerRoundTripper struct {
 
 func (rt *headerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	req = req.Clone(req.Context())
-	maps.Copy(req.Header, rt.resolveHeaders(req.Context()))
+	if !resolvedLifecycleHeaders(req.Context()) {
+		maps.Copy(req.Header, rt.resolveHeaders(req.Context()))
+	}
 	return rt.base.RoundTrip(req)
 }
 
 // resolveHeaders is shared by native transport and the invocation-scoped CLI
 // handoff. The caller supplies the original ADK context, including SessionID.
 func (rt *headerRoundTripper) resolveHeaders(ctx context.Context) http.Header {
+	ctx = currentInvocation(ctx)
 	headers := make(http.Header)
 
 	// When KAGENT_PROPAGATE_TOKEN is set, forward Authorization from the incoming
@@ -369,7 +383,7 @@ func (rt *headerRoundTripper) resolveHeaders(ctx context.Context) http.Header {
 // mcptoolset and wraps the result with any MCP App-capable tool names found
 // during classification.
 func initializeToolSet(ctx context.Context, params mcpServerParams, toolFilter map[string]bool) (*mcpAppToolset, error) {
-	mcpTransport, err := createTransport(ctx, params)
+	mcpTransport, err := createManagedTransport(ctx, params)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create transport for %s: %w", params.URL, err)
 	}
@@ -404,5 +418,5 @@ func initializeToolSet(ctx context.Context, params mcpServerParams, toolFilter m
 	if toolPredicate != nil {
 		visibleTools = tool.FilterToolset(toolset, toolPredicate)
 	}
-	return &mcpAppToolset{inner: visibleTools, appToolNames: appToolNames}, nil
+	return &mcpAppToolset{inner: &nativeInvocationToolset{inner: visibleTools}, appToolNames: appToolNames}, nil
 }

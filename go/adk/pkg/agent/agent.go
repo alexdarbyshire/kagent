@@ -67,10 +67,13 @@ func createGoogleADKAgent(ctx context.Context, agentConfig *adk.AgentConfig, age
 
 	propagateToken := strings.EqualFold(strings.TrimSpace(env.KagentPropagateToken.Get()), "true")
 	var dynamicHeaderProvider mcp.DynamicHeaderProvider
+	var lifecycleProvider mcp.LifecycleAuthorityProvider
 	if stsPlugin != nil {
 		dynamicHeaderProvider = stsPlugin.HeaderProvider
+		lifecycleProvider = stsPlugin.LifecycleAuthority
 	}
-	toolsets := mcp.CreateToolsets(ctx, agentConfig.HttpTools, agentConfig.SseTools, agentConfig.StdioTools, propagateToken, dynamicHeaderProvider)
+	mcpLifecycle := mcp.NewClientLifecycle(ctx, lifecycleProvider)
+	toolsets := mcp.CreateToolsets(ctx, agentConfig.HttpTools, agentConfig.SseTools, agentConfig.StdioTools, propagateToken, dynamicHeaderProvider, mcpLifecycle)
 	skillsDirectory := agentConfig.SkillsDirectory
 	if skillsDirectory == "" && legacySkillsEnv {
 		if folder, set := env.KagentSkillsFolder.Lookup(); set {
@@ -99,7 +102,7 @@ func createGoogleADKAgent(ctx context.Context, agentConfig *adk.AgentConfig, age
 	if hasSkills || commandDirectory != "" {
 		executionConfig := tools.ExecutionConfig{SkillsDirectory: skillsDirectory, CommandDirectory: commandDirectory}
 		if commandDirectory != "" {
-			executionConfig.PrepareEnvironment = mcp.PrepareCLIEnvironment(ctx, agentConfig.CLITools, propagateToken, dynamicHeaderProvider)
+			executionConfig.PrepareEnvironment = mcp.PrepareCLIEnvironment(ctx, agentConfig.CLITools, propagateToken, dynamicHeaderProvider, mcpLifecycle)
 		}
 		executionTools, err := tools.NewExecutionTools(executionConfig)
 		if err != nil {
