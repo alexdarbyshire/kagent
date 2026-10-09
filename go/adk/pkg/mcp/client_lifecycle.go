@@ -482,7 +482,7 @@ func (m *managedHTTPTransport) dispatch(request *http.Request) (*http.Response, 
 		}
 	}
 	if err != nil {
-		return nil, fmt.Errorf("MCP relationship state lost; operation not replayed: %v", err)
+		return nil, fmt.Errorf("MCP relationship state lost; operation not replayed: %w", err)
 	}
 	if lost {
 		_ = response.Body.Close()
