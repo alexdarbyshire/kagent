@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"net/http"
 	"sync"
@@ -143,6 +144,7 @@ type managedHTTPTransport struct {
 	initialization context.Context
 	commandHeaders *cliCommandHeaders
 	lost           bool
+	requestTimeout time.Duration
 }
 
 var _ http.RoundTripper = (*managedHTTPTransport)(nil)
@@ -158,6 +160,38 @@ func (m *managedHTTPTransport) capture(ctx context.Context) {
 }
 
 func (m *managedHTTPTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	if request.Method != http.MethodPost || m.requestTimeout <= 0 {
+		return m.roundTrip(request)
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), m.requestTimeout)
+	response, err := m.roundTrip(request.Clone(ctx))
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	response.Body = &requestDeadlineBody{ReadCloser: response.Body, cancel: cancel}
+	return response, nil
+}
+
+type requestDeadlineBody struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (b *requestDeadlineBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if err != nil {
+		b.cancel()
+	}
+	return n, err
+}
+
+func (b *requestDeadlineBody) Close() error {
+	defer b.cancel()
+	return b.ReadCloser.Close()
+}
+
+func (m *managedHTTPTransport) roundTrip(request *http.Request) (*http.Response, error) {
 	if request.Method != http.MethodDelete {
 		invocation := currentInvocation(request.Context())
 		if m.commandHeaders != nil {
@@ -357,6 +391,10 @@ func (m *managedTransport) Connect(ctx context.Context) (mcpsdk.Connection, erro
 	switch inner := m.inner.(type) {
 	case *mcpsdk.StreamableClientTransport:
 		copyTransport, copyClient := *inner, *inner.HTTPClient
+		// POST deadlines include response bodies. The connection-owned GET
+		// must survive between invocations instead of expiring with that budget.
+		managed.requestTimeout = copyClient.Timeout
+		copyClient.Timeout = 0
 		copyTransport.MaxRetries = -1
 		copyClient.CheckRedirect = terminationRedirectPolicy(copyClient.CheckRedirect)
 		managed.endpoint = inner.Endpoint

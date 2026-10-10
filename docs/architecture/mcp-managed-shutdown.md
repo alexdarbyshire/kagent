@@ -23,6 +23,12 @@ streams still authenticate normally. Static and provider-held standalone streams
 remain enabled. A legacy SSE connection, whose initial GET is required, fails
 explicitly if no current or provider-held authority can authorize it.
 
+For managed Streamable HTTP, the configured request timeout bounds POST requests
+through response-body consumption. The standalone GET belongs to the connection
+lifetime and is not expired by that request budget. DELETE retains its separate
+bounded shutdown deadline. Actual stream or relationship loss remains explicit;
+this separation does not enable automatic reconnection or operation replay.
+
 STS references identify existing session/subject cache custody and its generation.
 They contain no token or invocation. Resolution cannot exchange a token, renew
 expiry or idle eviction, or revive custody after eviction/replacement. Propagate-only
