@@ -69,6 +69,20 @@ func TestConfigurationCRDValidation(t *testing.T) {
 	const namespace = "configuration-crd-cel"
 	require.NoError(t, cl.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: namespace}}))
 
+	t.Run("Harness retains exact bootstrap capabilities", func(t *testing.T) {
+		capabilities := &corev1.Capabilities{
+			Drop: []corev1.Capability{"ALL"},
+			Add:  []corev1.Capability{"CHOWN", "SETUID", "SETGID", "NET_BIND_SERVICE"},
+		}
+		harness := validHarness(namespace, "bootstrap-capabilities", HarnessSpec{
+			Kagent: &KagentHarness{}, Workload: HarnessWorkload{Capabilities: capabilities},
+		})
+		require.NoError(t, cl.Create(ctx, harness, &ctrlclient.CreateOptions{FieldValidation: metav1.FieldValidationStrict}))
+		var stored Harness
+		require.NoError(t, cl.Get(ctx, ctrlclient.ObjectKeyFromObject(harness), &stored))
+		require.Equal(t, capabilities, stored.Spec.Workload.Capabilities)
+	})
+
 	cases := []struct {
 		name       string
 		object     ctrlclient.Object

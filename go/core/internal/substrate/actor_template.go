@@ -3,6 +3,7 @@ package substrate
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -88,15 +89,22 @@ func ActorTemplateForRevision(spec *translator.Revision, revisionID translator.R
 		return nil, err
 	}
 
+	var securityContext *ateapipb.SecurityContext
+	if spec.Capabilities != nil {
+		securityContext = &ateapipb.SecurityContext{Capabilities: &ateapipb.Capabilities{
+			Add: capabilityNames(spec.Capabilities.Add), Drop: capabilityNames(spec.Capabilities.Drop),
+		}}
+	}
 	template := &ateapipb.ActorTemplate{
 		Metadata:      &ateapipb.ResourceMetadata{Atespace: spec.Namespace, Name: name},
 		SandboxConfig: sandboxConfig,
 		Containers: []*ateapipb.Container{{
-			Name:    defaultContainerName,
-			Image:   spec.Image,
-			Command: append([]string(nil), spec.Command...),
-			Args:    append([]string(nil), spec.Args...),
-			Env:     actorEnv,
+			SecurityContext: securityContext,
+			Name:            defaultContainerName,
+			Image:           spec.Image,
+			Command:         append([]string(nil), spec.Command...),
+			Args:            append([]string(nil), spec.Args...),
+			Env:             actorEnv,
 			WakeupProbe: &ateapipb.ContainerWakeupProbe{HttpGet: &ateapipb.HTTPGetAction{
 				Path: "/readyz",
 				Port: 8081,
@@ -236,4 +244,13 @@ func sandboxConfigForClass(class atev1alpha1.SandboxClass) (*ateapipb.SandboxCon
 	default:
 		return nil, fmt.Errorf("unsupported sandbox class %q", class)
 	}
+}
+
+func capabilityNames(capabilities []corev1.Capability) []string {
+	names := make([]string, len(capabilities))
+	for i, capability := range capabilities {
+		names[i] = string(capability)
+	}
+	slices.Sort(names)
+	return names
 }

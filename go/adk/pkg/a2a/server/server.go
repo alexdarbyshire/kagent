@@ -248,7 +248,7 @@ func (s *A2AServer) Start() error {
 
 	// Substrate may snapshot immediately after /readyz succeeds. Bind A2A
 	// before exposing readiness so that snapshot always contains its listener.
-	listener, err := net.Listen("tcp", s.httpServer.Addr)
+	listener, err := a2aListener(s.httpServer.Addr)
 	if err != nil {
 		return fmt.Errorf("listen for A2A: %w", err)
 	}
@@ -270,6 +270,32 @@ func (s *A2AServer) Start() error {
 	}()
 
 	return nil
+}
+
+// The trusted launcher supplies a bound socket after dropping privileges.
+// Explicit invalid wiring must fail rather than falling back to another bind.
+func a2aListener(address string) (net.Listener, error) {
+	value, inherited := os.LookupEnv("KAGENT_A2A_LISTEN_FD") //nolint:forbidigo // Private trusted-launcher handoff, not a configurable runtime setting.
+	if !inherited {
+		return net.Listen("tcp", address)
+	}
+	fd, err := strconv.Atoi(value)
+	if err != nil || fd < 3 {
+		return nil, fmt.Errorf("inherited A2A listener descriptor must be at least 3")
+	}
+	file := os.NewFile(uintptr(fd), "inherited-a2a")
+	listener, err := net.FileListener(file)
+	_ = file.Close()
+	if err != nil {
+		return nil, fmt.Errorf("inherited A2A listener: %w", err)
+	}
+	_, port, err := net.SplitHostPort(address)
+	tcp, ok := listener.Addr().(*net.TCPAddr)
+	if err != nil || !ok || strconv.Itoa(tcp.Port) != port {
+		_ = listener.Close()
+		return nil, fmt.Errorf("inherited A2A listener must be TCP on configured port")
+	}
+	return listener, nil
 }
 
 // WaitForShutdown blocks until a shutdown signal is received or the listener

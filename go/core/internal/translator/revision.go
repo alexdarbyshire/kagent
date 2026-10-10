@@ -45,10 +45,11 @@ type Revision struct {
 	Namespace string
 
 	// Image and Environment describe the runtime container.
-	Image       string
-	Command     []string
-	Args        []string
-	Environment []corev1.EnvVar
+	Capabilities *corev1.Capabilities
+	Image        string
+	Command      []string
+	Args         []string
+	Environment  []corev1.EnvVar
 	// ConfigJSON is injected into the runtime container verbatim.
 	// AgentCard stays typed until a runtime or public protocol boundary renders it.
 	ConfigJSON []byte
@@ -93,6 +94,7 @@ func (r *Revision) Digest() (RevisionID, error) {
 		AgentName          string                   `json:"agentName"`
 		AgentUID           string                   `json:"agentUID"`
 		Namespace          string                   `json:"namespace"`
+		Capabilities       *corev1.Capabilities     `json:"capabilities,omitempty"`
 		Image              string                   `json:"image"`
 		Command            []string                 `json:"command,omitempty"`
 		Args               []string                 `json:"args,omitempty"`
@@ -110,7 +112,7 @@ func (r *Revision) Digest() (RevisionID, error) {
 		WorkerPoolNamespace string `json:"workerPoolNamespace"`
 	}{
 		AgentName: r.AgentName, AgentUID: r.AgentUID, Namespace: r.Namespace,
-		Image: r.Image, Command: r.Command, Args: r.Args, Environment: r.Environment, ConfigJSON: r.ConfigJSON,
+		Capabilities: r.Capabilities, Image: r.Image, Command: r.Command, Args: r.Args, Environment: r.Environment, ConfigJSON: r.ConfigJSON,
 		WorkerPoolName: r.WorkerPoolName, SnapshotLocation: r.SnapshotLocation, Provenance: r.Provenance,
 		Credentials: r.Credentials, EgressDestinations: r.EgressDestinations,
 		SandboxClass: sandboxClass, WorkerPoolNamespace: r.Namespace,
