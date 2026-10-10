@@ -112,6 +112,11 @@ type BYOHarness struct{}
 
 // HarnessWorkload identifies the immutable runtime image used by a Harness.
 type HarnessWorkload struct {
+	// Capabilities adjusts bootstrap Linux capabilities. Omitted retains runtime defaults.
+	// Drop ALL with explicit Add entries selects an exact set.
+	// +optional
+	Capabilities *corev1.Capabilities `json:"capabilities,omitempty"`
+
 	// Image is an OCI image reference pinned by sha256 digest.
 	// +kubebuilder:validation:Pattern=`^[^[:space:]@]+@sha256:[a-f0-9]{64}$`
 	// +required
