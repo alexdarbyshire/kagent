@@ -32,6 +32,10 @@
 
 **kagent** is a Kubernetes native framework for building AI agents. Kubernetes is the most popular orchestration platform for running workloads, and **kagent** makes it easy to build, deploy and manage AI agents in Kubernetes. The **kagent** framework is designed to be easy to understand and use, and to provide a flexible and powerful way to build and manage AI agents.
 
+### This fork
+
+The `feature/mcp-cli` branch contains **mcp2cli**, an agentically developed proof of concept in use by Alex Darbyshire's kagent estate. It exposes selected MCP tools as commands for agents. It is not intended or developed for an upstream merge, though the upstream community is welcome to explore the idea. See [fork maintenance](FORK-MAINTENANCE.md) for upstream synchronization and estate promotion.
+
 <div align="center">
   <img src="img/kagent-agents-ui.gif" alt="Kagent Agents UI" width="800">
 </div>
@@ -131,7 +135,7 @@ There are many ways to get involved:
 
 ### Local development
 
-For instructions on how to run everything locally, see the [DEVELOPMENT.md](DEVELOPMENT.md) file.
+For instructions on running Kagent locally, see [DEVELOPMENT.md](DEVELOPMENT.md).
 
 ### Contributors
 
