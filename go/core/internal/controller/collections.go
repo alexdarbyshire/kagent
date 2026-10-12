@@ -2,13 +2,11 @@ package controller
 
 import (
 	"reflect"
-	"strings"
 
 	atev1alpha1 "github.com/agent-substrate/substrate/pkg/api/v1alpha1"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	kagentv1alpha3 "github.com/kagent-dev/kagent/go/api/v1alpha3"
 	"github.com/kagent-dev/kagent/go/core/internal/translator"
-	"github.com/kagent-dev/kagent/go/core/pkg/env"
 	"google.golang.org/protobuf/proto"
 	"istio.io/istio/pkg/kube"
 	"istio.io/istio/pkg/kube/controllers"
@@ -78,15 +76,7 @@ func NewCollections(client kube.Client, watchNamespaces []string, opts krt.Optio
 		Harnesses: harnesses, AgentTemplates: agentTemplates, ResolvedModelConfigs: resolvedModelConfigs, RemoteMCPServers: remoteMCPServers,
 		ConfigMaps: configMaps, Secrets: secrets, WorkerPools: workerPools,
 	}
-	// Capture controller capability registration once, outside KRT callbacks.
-	cliGoImages := strings.Split(env.MCPCLIGoImages.Get(), ",")
-	for i := range cliGoImages {
-		cliGoImages[i] = strings.TrimSpace(cliGoImages[i])
-	}
-	if len(cliGoImages) == 1 && cliGoImages[0] == "" {
-		cliGoImages = nil
-	}
-	reconciliations := newAgentReconciliations(agents, compilerCollections, agentRuntimeObservations, opts, cliGoImages)
+	reconciliations := newAgentReconciliations(agents, compilerCollections, agentRuntimeObservations, opts)
 	statuses := newAgentStatuses(agents, reconciliations, opts)
 
 	return Collections{

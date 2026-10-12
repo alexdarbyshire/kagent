@@ -193,7 +193,7 @@ func compiler(t *testing.T, objects ...any) *translator.Compiler {
 	collections := mockCollections(t, append(objects, defaultWorkerPool())...)
 	ctx := krt.TestingDummyContext{}
 	return translator.NewCompiler(ctx, collections, map[translator.HarnessType]translator.HarnessCompiler{
-		translator.HarnessTypeKagent: kagenttranslator.NewCompiler(ctx, collections, nil),
+		translator.HarnessTypeKagent: kagenttranslator.NewCompiler(ctx, collections),
 		translator.HarnessTypeCodex:  codextranslator.NewCompiler(ctx, collections),
 		translator.HarnessTypeClaude: claudetranslator.NewCompiler(ctx, collections),
 		translator.HarnessTypeBYO:    byotranslator.NewCompiler(ctx, collections),
@@ -604,7 +604,7 @@ func TestCompileAgentInjectsCredentialsAtGateway(t *testing.T) {
 	rotated.UID = "replacement-secret"
 	rotated.Data["token"] = []byte("rotated-token")
 	rotatedCompiler := translator.NewCompiler(krt.TestingDummyContext{}, mockCollections(t, modelConfig(), server, secondServer, rotated, secondSecret, defaultWorkerPool(), harness), map[translator.HarnessType]translator.HarnessCompiler{
-		translator.HarnessTypeKagent: kagenttranslator.NewCompiler(krt.TestingDummyContext{}, mockCollections(t, modelConfig(), server, secondServer, rotated, secondSecret), nil),
+		translator.HarnessTypeKagent: kagenttranslator.NewCompiler(krt.TestingDummyContext{}, mockCollections(t, modelConfig(), server, secondServer, rotated, secondSecret)),
 	})
 	next, err := rotatedCompiler.CompileAgent(t.Context(), inlineAgent(harness, template))
 	require.NoError(t, err)

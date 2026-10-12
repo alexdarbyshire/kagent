@@ -19,9 +19,8 @@ import (
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// CI registers the exact digest of its built Go image in the controller's
-// KAGENT_MCP_CLI_GO_IMAGES before installation. This test never silently skips
-// missing registration or a bridge-free runtime image.
+// The Go runtime must include mcp-cli. This test never silently skips
+// a bridge-free runtime image.
 func TestMCPCLIInteraction(t *testing.T) {
 	t.Parallel()
 	harness := testHarness{name: "kagent", runtimeLabel: "kagent"}

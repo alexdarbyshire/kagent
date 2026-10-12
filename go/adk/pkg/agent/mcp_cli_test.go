@@ -14,6 +14,18 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestCreateGoogleADKAgentCLIRequiresPackagedBridge(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	root := &adk.AgentConfig{
+		CLITools: []adk.MCPCLIConfig{{Name: "browser", HTTP: adk.HttpMcpServerConfig{
+			Params: adk.StreamableHTTPConnectionParams{Url: "https://browser.example/mcp"},
+		}}},
+	}
+	created, err := agent.CreateGoogleADKAgent(t.Context(), root, "root", nil)
+	require.Nil(t, created)
+	require.ErrorContains(t, err, "failed to find packaged MCP CLI bridge")
+}
+
 func TestCreateGoogleADKAgentCLIFailureRemovesPartialTree(t *testing.T) {
 	binary := filepath.Join(t.TempDir(), "mcp-cli")
 	output, err := exec.Command("go", "build", "-o", binary, "../../cmd/mcp-cli").CombinedOutput()

@@ -12,11 +12,10 @@ import (
 	"istio.io/istio/pkg/kube/krt"
 	"istio.io/istio/pkg/kube/krt/krttest"
 	corev1 "k8s.io/api/core/v1"
-	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-func TestMCPCLIPreparationPublishesCompatibilityAndCapturedConfiguration(t *testing.T) {
+func TestMCPCLIPreparationWithoutImageRegistration(t *testing.T) {
 	stop := make(chan struct{})
 	t.Cleanup(func() { close(stop) })
 	opts := krt.NewOptionsBuilder(stop, "mcp-cli", nil)
@@ -39,34 +38,20 @@ func TestMCPCLIPreparationPublishesCompatibilityAndCapturedConfiguration(t *test
 	collections := v2translator.Collections{Harnesses: krttest.GetMockCollection[*v1alpha3.Harness](mock), AgentTemplates: templates, ResolvedModelConfigs: models,
 		RemoteMCPServers: krttest.GetMockCollection[*v1alpha3.RemoteMCPServer](mock), ConfigMaps: configMaps, Secrets: secrets, WorkerPools: krttest.GetMockCollection[*atev1alpha1.WorkerPool](mock)}
 	observations := krttest.GetMockCollection[AgentRuntimeObservation](mock)
-	disabled := newAgentReconciliations(agents, collections, observations, opts, nil)
-	statuses := newAgentStatuses(agents, disabled, opts)
-	waitFor(t, func() bool {
-		items := statuses.List()
-		if len(items) != 1 {
-			return false
-		}
-		condition := apimeta.FindStatusCondition(items[0].Status.Conditions, v1alpha3.AgentConditionCompatible)
-		return condition != nil && condition.Status == metav1.ConditionFalse && condition.Reason == "UnsupportedConfiguration"
-	})
-	require.Nil(t, disabled.GetKey("test/agent").Target)
-	require.Contains(t, disabled.GetKey("test/agent").CompilationFailure.Message, "KAGENT_MCP_CLI_GO_IMAGES")
-	images := []string{h.Spec.Workload.Image}
-	registered := newAgentReconciliations(agents, collections, observations, opts, images)
-	images[0] = "changed-after-capture"
-	waitFor(t, func() bool { state := registered.GetKey("test/agent"); return state != nil && state.Target != nil })
+	prepared := newAgentReconciliations(agents, collections, observations, opts)
+	waitFor(t, func() bool { state := prepared.GetKey("test/agent"); return state != nil && state.Target != nil })
 	var config adk.AgentConfig
-	require.NoError(t, json.Unmarshal(registered.GetKey("test/agent").Target.Revision.ConfigJSON, &config))
+	require.NoError(t, json.Unmarshal(prepared.GetKey("test/agent").Target.Revision.ConfigJSON, &config))
 	require.Len(t, config.CLITools, 1)
 	require.Empty(t, config.HttpTools)
 	updated := a.DeepCopy()
 	updated.Spec.Tools[0].MCP.RequireApproval = true
 	templates.UpdateObject(updated)
 	waitFor(t, func() bool {
-		state := registered.GetKey("test/agent")
+		state := prepared.GetKey("test/agent")
 		return state != nil && state.CompilationFailure != nil
 	})
-	state := registered.GetKey("test/agent")
+	state := prepared.GetKey("test/agent")
 	require.Nil(t, state.Target)
 	require.Equal(t, "UnsupportedConfiguration", state.CompilationFailure.Reason)
 	require.Contains(t, state.CompilationFailure.Message, "requireApproval")

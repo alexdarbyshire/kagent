@@ -16,18 +16,18 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-func TestCompileAgentRejectsCLIWithoutRegisteredGoImage(t *testing.T) {
+func TestCompileAgentCLIRequiresDigestPinnedGoImage(t *testing.T) {
 	var binding v1alpha3.MCPToolBinding
 	require.NoError(t, json.Unmarshal([]byte(`{"server":{"kind":"RemoteMCPServer","name":"browser"},"exposeAsCLI":true}`), &binding))
 	harness := &v1alpha3.Harness{ObjectMeta: metav1.ObjectMeta{Name: "go", Namespace: "test"}, Spec: v1alpha3.HarnessSpec{
-		Kagent: &v1alpha3.KagentHarness{}, Workload: v1alpha3.HarnessWorkload{Image: "example.com/go@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+		Kagent: &v1alpha3.KagentHarness{}, Workload: v1alpha3.HarnessWorkload{Image: "example.com/go:latest"},
 		Substrate: v1alpha3.RuntimeSubstratePolicy{WorkerPoolRef: corev1.LocalObjectReference{Name: "default"}},
 	}}
 	template := &v1alpha3.AgentTemplate{ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: "test"}, Spec: v1alpha3.AgentTemplateSpec{
 		ModelConfig: &corev1.LocalObjectReference{Name: "default-model"}, Tools: []v1alpha3.ToolBinding{{MCP: &binding}},
 	}}
 	_, err := compiler(t, harness, modelConfig(), remoteMCPServer("browser", "http://browser.example/mcp")).CompileAgent(t.Context(), inlineAgent(harness, template))
-	require.ErrorContains(t, err, "KAGENT_MCP_CLI_GO_IMAGES")
+	require.ErrorContains(t, err, "requires an exact digest-pinned Go image")
 }
 
 func TestCompileAgentCLIReplacesNativeAndRetainsEgress(t *testing.T) {
@@ -98,7 +98,7 @@ func cliCompiler(t *testing.T, harness *v1alpha3.Harness, objects ...any) *v2tra
 	collections := mockCollections(t, append(objects, defaultWorkerPool(), harness)...)
 	ctx := krt.TestingDummyContext{}
 	return v2translator.NewCompiler(ctx, collections, map[v2translator.HarnessType]v2translator.HarnessCompiler{
-		v2translator.HarnessTypeKagent: kagenttranslator.NewCompiler(ctx, collections, []string{harness.Spec.Workload.Image}),
+		v2translator.HarnessTypeKagent: kagenttranslator.NewCompiler(ctx, collections),
 	})
 }
 
@@ -168,7 +168,7 @@ func TestCompileAgentCLISharedAndReferencedConfiguration(t *testing.T) {
 				publicAgent.Spec.HarnessRef = corev1.LocalObjectReference{Name: h.Name}
 			}
 			compile := func() (*v2translator.CompileResult, error) {
-				return cliCompiler(t, h, modelConfig(), s, native, child, root, h).CompileAgent(t.Context(), publicAgent)
+				return cliCompiler(t, h, modelConfig(), s, native, child, root).CompileAgent(t.Context(), publicAgent)
 			}
 			revision, err := compile()
 			require.NoError(t, err)
