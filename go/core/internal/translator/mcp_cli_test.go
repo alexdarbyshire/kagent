@@ -164,7 +164,7 @@ func TestCompileAgentCLISharedAndReferencedConfiguration(t *testing.T) {
 			publicAgent := inlineAgent(h, root)
 			if referenced {
 				publicAgent.Spec.Template = v1alpha3.AgentTemplateSource{}
-				publicAgent.Spec.TemplateRef = &corev1.LocalObjectReference{Name: root.Name}
+				publicAgent.Spec.Template.Ref = &corev1.LocalObjectReference{Name: root.Name}
 				publicAgent.Spec.HarnessRef = corev1.LocalObjectReference{Name: h.Name}
 			}
 			compile := func() (*v2translator.CompileResult, error) {
