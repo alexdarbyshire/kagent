@@ -26,7 +26,7 @@ func TestCompileAgentRejectsCLIWithoutRegisteredGoImage(t *testing.T) {
 	template := &v1alpha3.AgentTemplate{ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: "test"}, Spec: v1alpha3.AgentTemplateSpec{
 		ModelConfig: &corev1.LocalObjectReference{Name: "default-model"}, Tools: []v1alpha3.ToolBinding{{MCP: &binding}},
 	}}
-	_, err := compiler(t, modelConfig(), remoteMCPServer("browser", "http://browser.example/mcp")).CompileAgent(t.Context(), inlineAgent(harness, template))
+	_, err := compiler(t, harness, modelConfig(), remoteMCPServer("browser", "http://browser.example/mcp")).CompileAgent(t.Context(), inlineAgent(harness, template))
 	require.ErrorContains(t, err, "KAGENT_MCP_CLI_GO_IMAGES")
 }
 
@@ -34,7 +34,7 @@ func TestCompileAgentCLIReplacesNativeAndRetainsEgress(t *testing.T) {
 	harness, template := cliConfiguration()
 	server := remoteMCPServer("browser", "http://browser.example:8080/gateway/mcp")
 	server.Spec.Description = "Browse documents"
-	result, err := cliCompiler(t, harness.Spec.Workload.Image, modelConfig(), server).CompileAgent(t.Context(), inlineAgent(harness, template))
+	result, err := cliCompiler(t, harness, modelConfig(), server).CompileAgent(t.Context(), inlineAgent(harness, template))
 	require.NoError(t, err)
 	var runtime struct {
 		CLI []struct {
@@ -60,7 +60,7 @@ func TestCompileAgentCLISSEAndInvocationAuthentication(t *testing.T) {
 	server.Spec.Protocol = v1alpha3.RemoteMCPServerProtocolSse
 	server.Spec.Timeout = &metav1.Duration{Duration: 3 * time.Second}
 	server.Spec.SseReadTimeout = &metav1.Duration{Duration: 10 * time.Second}
-	result, err := cliCompiler(t, harness.Spec.Workload.Image, modelConfig(), server).CompileAgent(t.Context(), inlineAgent(harness, template))
+	result, err := cliCompiler(t, harness, modelConfig(), server).CompileAgent(t.Context(), inlineAgent(harness, template))
 	require.NoError(t, err)
 	var config map[string]json.RawMessage
 	require.NoError(t, json.Unmarshal(result.ConfigJSON, &config))
@@ -93,12 +93,12 @@ func cliConfiguration() (*v1alpha3.Harness, *v1alpha3.AgentTemplate) {
 	return harness, template
 }
 
-func cliCompiler(t *testing.T, image string, objects ...any) *v2translator.Compiler {
+func cliCompiler(t *testing.T, harness *v1alpha3.Harness, objects ...any) *v2translator.Compiler {
 	t.Helper()
-	collections := mockCollections(t, append(objects, defaultWorkerPool())...)
+	collections := mockCollections(t, append(objects, defaultWorkerPool(), harness)...)
 	ctx := krt.TestingDummyContext{}
 	return v2translator.NewCompiler(ctx, collections, map[v2translator.HarnessType]v2translator.HarnessCompiler{
-		v2translator.HarnessTypeKagent: kagenttranslator.NewCompiler(ctx, collections, []string{image}),
+		v2translator.HarnessTypeKagent: kagenttranslator.NewCompiler(ctx, collections, []string{harness.Spec.Workload.Image}),
 	})
 }
 
@@ -143,7 +143,7 @@ func TestCompileAgentCLIRejectsUnsupportedAndCollidingBindings(t *testing.T) {
 			h, a := cliConfiguration()
 			s := remoteMCPServer("browser", "http://browser.example/mcp")
 			tt.change(h, a, s)
-			_, err := cliCompiler(t, h.Spec.Workload.Image, modelConfig(), s).CompileAgent(t.Context(), inlineAgent(h, a))
+			_, err := cliCompiler(t, h, modelConfig(), s).CompileAgent(t.Context(), inlineAgent(h, a))
 			require.ErrorContains(t, err, tt.want)
 			var validation *v2translator.ValidationError
 			require.ErrorAs(t, err, &validation)
@@ -163,13 +163,12 @@ func TestCompileAgentCLISharedAndReferencedConfiguration(t *testing.T) {
 			native := remoteMCPServer("native", "https://native.example/mcp")
 			publicAgent := inlineAgent(h, root)
 			if referenced {
-				publicAgent.Spec.Template = nil
-				publicAgent.Spec.Harness = nil
-				publicAgent.Spec.TemplateRef = &corev1.LocalObjectReference{Name: root.Name}
-				publicAgent.Spec.HarnessRef = &corev1.LocalObjectReference{Name: h.Name}
+				publicAgent.Spec.Template = v1alpha3.AgentTemplateSource{}
+				publicAgent.Spec.Template.Ref = &corev1.LocalObjectReference{Name: root.Name}
+				publicAgent.Spec.HarnessRef = corev1.LocalObjectReference{Name: h.Name}
 			}
 			compile := func() (*v2translator.CompileResult, error) {
-				return cliCompiler(t, h.Spec.Workload.Image, modelConfig(), s, native, child, root, h).CompileAgent(t.Context(), publicAgent)
+				return cliCompiler(t, h, modelConfig(), s, native, child, root, h).CompileAgent(t.Context(), publicAgent)
 			}
 			revision, err := compile()
 			require.NoError(t, err)
@@ -192,7 +191,7 @@ func TestCompileAgentCLIFalseAndUnsupportedHarnesses(t *testing.T) {
 	for _, exposure := range []*bool{nil, new(false)} {
 		h, a := cliConfiguration()
 		a.Spec.Tools[0].MCP.ExposeAsCLI = exposure
-		result, err := compiler(t, modelConfig(), remoteMCPServer("browser", "https://browser.example/mcp")).CompileAgent(t.Context(), inlineAgent(h, a))
+		result, err := compiler(t, h, modelConfig(), remoteMCPServer("browser", "https://browser.example/mcp")).CompileAgent(t.Context(), inlineAgent(h, a))
 		require.NoError(t, err)
 		var config adk.AgentConfig
 		require.NoError(t, json.Unmarshal(result.ConfigJSON, &config))
@@ -215,7 +214,7 @@ func TestCompileAgentCLIFalseAndUnsupportedHarnesses(t *testing.T) {
 				h.Spec.Kagent = nil
 				h.Spec.BYO = &v1alpha3.BYOHarness{}
 			}
-			_, err := compiler(t, modelConfig(), remoteMCPServer("browser", "https://browser.example/mcp")).CompileAgent(t.Context(), inlineAgent(h, a))
+			_, err := compiler(t, h, modelConfig(), remoteMCPServer("browser", "https://browser.example/mcp")).CompileAgent(t.Context(), inlineAgent(h, a))
 			require.Error(t, err)
 			var validation *v2translator.ValidationError
 			require.ErrorAs(t, err, &validation)

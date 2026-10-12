@@ -142,7 +142,7 @@ func runCompiledMCPCLIFixture(t *testing.T, withSkills, mixed bool) {
 	model := modelConfig()
 	model.Spec.Stream = new(false)
 	model.Spec.OpenAI = &v1alpha3.OpenAIConfig{BaseURL: modelHTTP.URL}
-	result, err := cliCompiler(t, harness.Spec.Workload.Image, model, remoteMCPServer("browser", mcpHTTP.URL), remoteMCPServer("native", mcpHTTP.URL)).CompileAgent(t.Context(), inlineAgent(harness, template))
+	result, err := cliCompiler(t, harness, model, remoteMCPServer("browser", mcpHTTP.URL), remoteMCPServer("native", mcpHTTP.URL)).CompileAgent(t.Context(), inlineAgent(harness, template))
 	require.NoError(t, err)
 	var config adk.AgentConfig
 	require.NoError(t, json.Unmarshal(result.ConfigJSON, &config))
