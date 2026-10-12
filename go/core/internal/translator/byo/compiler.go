@@ -28,7 +28,7 @@ func NewCompiler(ctx krt.HandlerContext, collections translator.Collections) *Co
 }
 
 func (c *Compiler) Compile(ctx context.Context, input *translator.HarnessInput) (*translator.CompileResult, error) {
-	if err := translator.ValidateCLIExposure(input, nil); err != nil {
+	if err := translator.ValidateCLIExposure(input); err != nil {
 		return nil, err
 	}
 	compiled, err := c.config.Build(ctx, input)

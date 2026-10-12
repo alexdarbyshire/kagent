@@ -21,24 +21,12 @@ RUN apk add --no-cache jq
 USER 65532:65532
 ```
 
-Build and publish through your normal image workflow. Obtain the resulting
-registry digest, then register that exact derived image reference with the
-controller. Installing a processor locally does not make it available in the
-agent runtime. Image registration is an operator assertion that the image
-contains the compatible Go runtime and bridge; it is not automatic detection.
-
-```yaml
-# Helm values excerpt; use the actual built image digest.
-controller:
-  env:
-    - name: KAGENT_MCP_CLI_GO_IMAGES
-      value: "registry.example/kagent/go-adk-jq@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-```
-
-The controller setting is a comma-separated list and defaults to empty. Use the
-identical reference in the Harness below. Registering the base image does not
-register a derived image, and registering a tag does not satisfy the digest
-requirement. Retain the image entrypoint or use `command: ["/app"]`.
+Build and publish through your normal image workflow, then pin the resulting
+registry digest in the Harness. Installing a processor locally does not make it
+available in the agent runtime. Derived images need no controller registration;
+keep the compatible Go runtime and packaged `mcp-cli` bridge. The runtime fails
+agent construction if the bridge is absent. Retain the image entrypoint or use
+`command: ["/app"]`.
 
 ## Author the agent
 
@@ -194,8 +182,8 @@ Actor replacement or suspend/resume starts fresh remote sessions.
 Shared children. Keep protected bindings native. Command visibility and tool
 selection are presentation controls; endpoint/gateway authorization, Substrate
 credential injection, egress policy, and existing runtime controls still apply.
-Python kagent, Codex, Claude, BYO, and unregistered images are unsupported for
-this CLI integration and fail preparation.
+Python kagent, Codex, Claude, and BYO are unsupported for this CLI integration.
+Unsupported Harnesses and entrypoint overrides fail preparation.
 
 Streamable HTTP and SSE are supported with their configured routes. The bridge
 does not follow redirects or automatically replay failed tool calls.

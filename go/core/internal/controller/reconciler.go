@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"math"
 	"reflect"
-	"slices"
 	"strings"
 	"time"
 
@@ -96,13 +95,11 @@ func newAgentReconciliations(
 	collections translator.Collections,
 	agentRuntimeObservations krt.Collection[AgentRuntimeObservation],
 	opts krt.OptionsBuilder,
-	cliGoImages []string,
 ) krt.Collection[AgentReconciliation] {
-	cliGoImages = slices.Clone(cliGoImages)
 	return krt.NewCollection(agents, func(ctx krt.HandlerContext, agent *kagentv1alpha3.Agent) *AgentReconciliation {
 		state := &AgentReconciliation{Agent: agent}
 		compilation, err := translator.NewCompiler(ctx, collections, map[translator.HarnessType]translator.HarnessCompiler{
-			translator.HarnessTypeKagent: kagenttranslator.NewCompiler(ctx, collections, cliGoImages),
+			translator.HarnessTypeKagent: kagenttranslator.NewCompiler(ctx, collections),
 			translator.HarnessTypeCodex:  codextranslator.NewCompiler(ctx, collections),
 			translator.HarnessTypeClaude: claudetranslator.NewCompiler(ctx, collections),
 			translator.HarnessTypeBYO:    byotranslator.NewCompiler(ctx, collections),

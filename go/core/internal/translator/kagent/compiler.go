@@ -18,18 +18,17 @@ import (
 
 // Compiler translates resolved inputs into a kagent runtime revision.
 type Compiler struct {
-	config      *adkconfig.Builder
-	cliGoImages []string
+	config *adkconfig.Builder
 }
 
 var _ translator.HarnessCompiler = (*Compiler)(nil)
 
-func NewCompiler(ctx krt.HandlerContext, collections translator.Collections, cliGoImages []string) *Compiler {
-	return &Compiler{config: adkconfig.NewBuilder(ctx, collections), cliGoImages: slices.Clone(cliGoImages)}
+func NewCompiler(ctx krt.HandlerContext, collections translator.Collections) *Compiler {
+	return &Compiler{config: adkconfig.NewBuilder(ctx, collections)}
 }
 
 func (c *Compiler) Compile(ctx context.Context, input *translator.HarnessInput) (*translator.CompileResult, error) {
-	if err := translator.ValidateCLIExposure(input, c.cliGoImages); err != nil {
+	if err := translator.ValidateCLIExposure(input); err != nil {
 		return nil, err
 	}
 	telemetryConfig, _ := translator.TelemetryConfigFromProcess()

@@ -9,9 +9,9 @@ import (
 
 var cliImageReference = regexp.MustCompile(`^[^[:space:]@]+@sha256:[a-f0-9]{64}$`)
 
-// ValidateCLIExposure verifies runtime support before a harness can compile CLI bindings.
-// An empty registered image list rejects CLI presentation while retaining native MCP.
-func ValidateCLIExposure(input *HarnessInput, registeredGoImages []string) error {
+// ValidateCLIExposure validates CLI bindings before harness compilation.
+// The Go runtime checks for its packaged bridge during agent construction.
+func ValidateCLIExposure(input *HarnessInput) error {
 	if input == nil || input.Harness == nil || input.Root == nil {
 		return NewValidationError("MCP CLI validation requires resolved Harness and agent inputs")
 	}
@@ -29,13 +29,8 @@ func ValidateCLIExposure(input *HarnessInput, registeredGoImages []string) error
 				return NewValidationError("MCP CLI binding %q requires the CLI-enabled kagent Go runtime; %s is unsupported", binding.Server.Name, harnessType(input.Harness))
 			}
 			image := input.Harness.Spec.Workload.Image
-			for _, registered := range registeredGoImages {
-				if !cliImageReference.MatchString(registered) {
-					return NewValidationError("invalid KAGENT_MCP_CLI_GO_IMAGES entry %q: expected an exact sha256 digest-pinned image reference", registered)
-				}
-			}
-			if !cliImageReference.MatchString(image) || !slices.Contains(registeredGoImages, image) {
-				return NewValidationError("MCP CLI binding %q requires an exact digest-pinned Go image registered in KAGENT_MCP_CLI_GO_IMAGES", binding.Server.Name)
+			if !cliImageReference.MatchString(image) {
+				return NewValidationError("MCP CLI binding %q requires an exact digest-pinned Go image", binding.Server.Name)
 			}
 			command := input.Harness.Spec.Workload.Command
 			if len(command) > 0 && !slices.Equal(command, []string{"/app"}) {

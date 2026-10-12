@@ -105,25 +105,14 @@ tools:
       exposeAsCLI: true
 ```
 
-The operator must build the CLI-enabled Go ADK image and register its exact
-digest-pinned reference in controller setting `KAGENT_MCP_CLI_GO_IMAGES`.
-The setting is a comma-separated list and defaults to empty, which disables CLI
-preparation. Helm accepts it through `controller.env`:
-
-```yaml
-controller:
-  env:
-    - name: KAGENT_MCP_CLI_GO_IMAGES
-      value: "registry.example/kagent/go-adk@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-```
-
-Replace the example with the digest of the image actually built with the bridge,
-and use the identical reference in `Harness.spec.workload.image`. Registration is
-an operator assertion about that image; the controller does not infer support
-from repository names or Harness status. CLI-enabled Harnesses select `kagent`,
-retain the image entrypoint or set `command: ["/app"]`, and can retain existing
-Go runtime arguments. Python kagent, Codex, Claude, BYO, unregistered images, and
-other entrypoint overrides fail preparation explicitly.
+CLI-enabled Harnesses use a digest-pinned kagent Go ADK image containing
+`mcp-cli`, retain the image entrypoint or set `command: ["/app"]`, and can retain
+existing Go runtime arguments. Derived images may add helpers or skills without
+controller image registration. The Go runtime checks for the packaged bridge
+and validates/materializes CLI bindings during agent construction; a missing
+bridge fails runtime startup. The controller validates configuration, not image
+contents. Python kagent, Codex, Claude, BYO, and other entrypoint overrides remain
+unsupported for CLI exposure.
 
 Each binding uses the RemoteMCPServer's name as its executable command:
 

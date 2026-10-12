@@ -55,7 +55,7 @@ func (c *Compiler) Compile(ctx context.Context, input *translator.HarnessInput) 
 		return nil, fmt.Errorf("codex compiler requires a resolved Harness, AgentTemplate, and ModelConfig")
 	}
 	model := input.Root.ResolvedModelConfig.Config
-	if err := translator.ValidateCLIExposure(input, nil); err != nil {
+	if err := translator.ValidateCLIExposure(input); err != nil {
 		return nil, err
 	}
 	if strings.TrimSpace(model.Spec.Model) == "" {

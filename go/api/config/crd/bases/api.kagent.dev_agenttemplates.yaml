@@ -317,7 +317,7 @@ spec:
                         exposeAsCLI:
                           description: |-
                             ExposeAsCLI presents this binding as a local command instead of native MCP
-                            tools. Requires an operator-registered CLI-enabled Go runtime image.
+                            tools. Requires a CLI-enabled Go runtime with the packaged mcp-cli bridge.
                           type: boolean
                         requireApproval:
                           description: |-
