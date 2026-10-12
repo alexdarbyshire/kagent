@@ -13,7 +13,7 @@ func TestMCPCLIBindingEditsProduceImmutableRevisions(t *testing.T) {
 		t.Run(change, func(t *testing.T) {
 			harness, template := cliConfiguration()
 			server := remoteMCPServer("browser", "http://browser.example/mcp")
-			compiler := cliCompiler(t, harness.Spec.Workload.Image, modelConfig(), server, remoteMCPServer("renamed", "http://browser.example/mcp"))
+			compiler := cliCompiler(t, harness, modelConfig(), server, remoteMCPServer("renamed", "http://browser.example/mcp"))
 			old, err := compiler.CompileAgent(t.Context(), inlineAgent(harness, template))
 			require.NoError(t, err)
 			oldID, err := old.Digest()
@@ -30,10 +30,10 @@ func TestMCPCLIBindingEditsProduceImmutableRevisions(t *testing.T) {
 				template.Spec.Tools[0].MCP.Server.Name = "renamed"
 			case "endpoint":
 				server.Spec.URL = "http://browser.example/new-route"
-				compiler = cliCompiler(t, harness.Spec.Workload.Image, modelConfig(), server)
+				compiler = cliCompiler(t, harness, modelConfig(), server)
 			case "description":
 				server.Spec.Description = "Updated command guidance"
-				compiler = cliCompiler(t, harness.Spec.Workload.Image, modelConfig(), server)
+				compiler = cliCompiler(t, harness, modelConfig(), server)
 			}
 			next, err := compiler.CompileAgent(t.Context(), inlineAgent(harness, template))
 			require.NoError(t, err)

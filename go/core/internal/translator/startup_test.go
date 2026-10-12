@@ -22,9 +22,9 @@ func TestBootstrapCapabilitiesReachActorAndRevisionIdentity(t *testing.T) {
 	require.NoError(t, err)
 	var configured v1alpha3.Harness
 	require.NoError(t, json.Unmarshal(raw, &configured))
-	baseline, err := compiler(t, modelConfig()).CompileAgent(context.Background(), inlineAgent(harness, template))
+	baseline, err := compiler(t, harness, modelConfig()).CompileAgent(context.Background(), inlineAgent(harness, template))
 	require.NoError(t, err)
-	changed, err := compiler(t, modelConfig()).CompileAgent(context.Background(), inlineAgent(&configured, template))
+	changed, err := compiler(t, &configured, modelConfig()).CompileAgent(context.Background(), inlineAgent(&configured, template))
 	require.NoError(t, err)
 	oldID, err := baseline.Digest()
 	require.NoError(t, err)

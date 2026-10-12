@@ -309,6 +309,7 @@ func CreateLLM(ctx context.Context, m adk.Model) (adkmodel.LLM, error) {
 			Endpoint:        m.Endpoint,
 			Deployment:      m.Deployment,
 			APIVersion:      m.APIVersion,
+			APIFormat:       m.APIFormat,
 		}
 		return models.NewAzureOpenAIModel(ctx, cfg)
 
