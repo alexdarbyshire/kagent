@@ -83,6 +83,11 @@ func NewKAgentExecutor(cfg KAgentExecutorConfig) (*KAgentExecutor, error) {
 	if rootName == "" {
 		return nil, fmt.Errorf("root agent name is required")
 	}
+	imagePlugin, err := newHITLImagesPlugin(runnerConfig.SessionService)
+	if err != nil {
+		return nil, err
+	}
+	runnerConfig.PluginConfig.Plugins = append(runnerConfig.PluginConfig.Plugins, imagePlugin)
 	builtin := adka2a.NewExecutor(adka2a.ExecutorConfig{
 		RunnerConfig:       runnerConfig,
 		RunConfig:          runConfig,

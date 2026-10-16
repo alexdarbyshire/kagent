@@ -2,7 +2,6 @@ package tools
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"fmt"
 	"io/fs"
@@ -293,7 +292,7 @@ func (c *CommandExecutor) ExecuteCommand(ctx context.Context, command string, wo
 	cleanup := configureCommandProcess(ctx, cmd)
 	defer cleanup()
 
-	var stdout, stderr bytes.Buffer
+	var stdout, stderr commandOutput
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
@@ -316,7 +315,8 @@ func (c *CommandExecutor) ExecuteCommand(ctx context.Context, command string, wo
 		errorMsg := fmt.Sprintf("Command failed with exit code %d", exitCode)
 		if stderrStr != "" {
 			errorMsg += ":\n" + stderrStr
-		} else if stdoutStr != "" {
+		}
+		if stdoutStr != "" {
 			errorMsg += ":\n" + stdoutStr
 		}
 		return "", fmt.Errorf("%s", errorMsg)

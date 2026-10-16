@@ -104,6 +104,10 @@ func NewAskUserTool() (tool.Tool, error) {
 		if err != nil {
 			return nil, fmt.Errorf("ask_user: failed to marshal result: %w", err)
 		}
-		return map[string]any{"result": string(resultJSON)}, nil
+		response := map[string]any{"result": string(resultJSON)}
+		if transport, ok := payload["transport_context"].(map[string]any); ok && len(transport) > 0 {
+			response["transport_context"] = transport
+		}
+		return response, nil
 	})
 }

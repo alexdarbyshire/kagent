@@ -87,6 +87,8 @@ type AskUserResponse struct {
 	Type    string          `json:"type"`
 	ID      string          `json:"id"`
 	Answers []AskUserAnswer `json:"answers,omitempty"`
+	// TransportContext carries optional service provenance separately from human answers.
+	TransportContext map[string]any `json:"transport_context,omitempty"`
 }
 
 // AttachHITL adds a typed HITL payload and extension declaration to a message.

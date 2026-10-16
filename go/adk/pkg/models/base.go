@@ -214,6 +214,12 @@ func extractFunctionResponseContent(resp any) string {
 		return s
 	}
 	if m, ok := resp.(map[string]any); ok {
+		// Service provenance is a sibling of human/tool result text. Flattening
+		// either result or content would discard it before the provider sees it.
+		if transport, ok := m["transport_context"].(map[string]any); ok && len(transport) > 0 {
+			b, _ := json.Marshal(m)
+			return string(b)
+		}
 		// Content array (most common shape from MCP tools)
 		if c, ok := m["content"].([]any); ok && len(c) > 0 {
 			var parts []string

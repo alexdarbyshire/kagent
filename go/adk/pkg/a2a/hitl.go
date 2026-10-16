@@ -584,6 +584,13 @@ func BuildResumeHITLMessage(storedTask *a2atype.Task, incoming *a2atype.Message)
 	if len(parts) == 0 {
 		return nil, fmt.Errorf("stored HITL request contains no approvals")
 	}
+	if askReq != nil && askReq.Nested == nil {
+		images, err := resumeImageParts(incoming)
+		if err != nil {
+			return nil, err
+		}
+		parts = append(parts, images...)
+	}
 	return a2atype.NewMessage(a2atype.MessageRoleUser, parts...), nil
 }
 
@@ -592,9 +599,11 @@ func processDirectAskUser(req *apia2a.AskUserRequest, message *a2atype.Message) 
 	if resp == nil || resp.ID != req.ID || len(resp.Answers) == 0 {
 		return nil, fmt.Errorf("ask_user decision is missing approval correlation or answers")
 	}
-	return []*a2atype.Part{buildConfirmationResponsePart(req.ID, true, map[string]any{
-		"answers": resp.Answers,
-	})}, nil
+	payload := map[string]any{"answers": resp.Answers}
+	if len(resp.TransportContext) > 0 {
+		payload["transport_context"] = resp.TransportContext
+	}
+	return []*a2atype.Part{buildConfirmationResponsePart(req.ID, true, payload)}, nil
 }
 
 func processDirectApproval(req *apia2a.ToolApprovalRequest, message *a2atype.Message) ([]*a2atype.Part, error) {

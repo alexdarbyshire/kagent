@@ -9,7 +9,9 @@ import (
 
 	"github.com/kagent-dev/kagent/go/adk/pkg/agent"
 	"github.com/kagent-dev/kagent/go/adk/pkg/controllerclient"
+	"github.com/kagent-dev/kagent/go/adk/pkg/mcp"
 	kagentmemory "github.com/kagent-dev/kagent/go/adk/pkg/memory"
+	"github.com/kagent-dev/kagent/go/adk/pkg/nativeartifacts"
 	"github.com/kagent-dev/kagent/go/adk/pkg/sts"
 	"github.com/kagent-dev/kagent/go/api/adk"
 	"github.com/kagent-dev/kagent/go/core/pkg/env"
@@ -19,6 +21,7 @@ import (
 	"google.golang.org/adk/v2/runner"
 	adksession "google.golang.org/adk/v2/session"
 	adktool "google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/loadartifactstool"
 )
 
 func agentNameFromAppName(appName string) string {
@@ -38,9 +41,10 @@ func CreateRunnerConfig(
 	memoryService *kagentmemory.KagentMemoryService,
 	controllerClient *controllerclient.Client,
 ) (runner.Config, error) {
+	ctx = mcp.WithResultTransformer(ctx, nativeartifacts.TransformResult)
 	log := logging.FromContext(ctx)
 
-	var extraTools []adktool.Tool
+	extraTools := []adktool.Tool{loadartifactstool.New()}
 	if memoryService != nil {
 		saveTool, err := kagentmemory.NewSaveMemoryTool(memoryService)
 		if err != nil {
@@ -94,10 +98,11 @@ func CreateRunnerConfig(
 	}
 
 	cfg := runner.Config{
-		AppName:        appName,
-		Agent:          adkAgent,
-		SessionService: adkSessionService,
-		MemoryService:  runnerMemory,
+		AppName:         appName,
+		Agent:           adkAgent,
+		SessionService:  adkSessionService,
+		ArtifactService: nativeartifacts.ProcessService(),
+		MemoryService:   runnerMemory,
 		PluginConfig: runner.PluginConfig{
 			Plugins: adkPlugins,
 		},
