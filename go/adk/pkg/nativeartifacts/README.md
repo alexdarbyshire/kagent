@@ -8,10 +8,11 @@ immutable fork revisions and owns role packaging, image publication and deployme
 
 ## Screenshot storage and model delivery
 
-Sending middleware intercepts ImageContent on the ADK toolset's existing MCP
-session. A thin wrapper binds invocation-local artifact access through
-Context.Value because ADK 2.4.0 lacks WithAgentContext. Save scopes a fresh UUID
-filename to the invoking application/user/session, without a user: prefix.
+The runner installs TransformResult through the existing MCP result-transformer
+seam before agent construction. Managed native and command calls supply their
+invocation-local agent context on the existing client relationship. Save scopes
+a fresh UUID filename to the invoking application/user/session, without a user:
+prefix.
 The envelope retains structured/nonimage content plus references. Native
 load_artifacts puts original bytes in model Parts, not retained session events.
 
