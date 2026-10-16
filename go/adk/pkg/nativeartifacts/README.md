@@ -22,34 +22,14 @@ progressive JPEG coefficient planes can exceed the 3 MiB original-byte bound in
 raster allocation/CPU. Adding pixel/dimension/count/raster limits would reject
 currently valid input and needs explicit alignment.
 
-## Historical transport decisions
+## Managed transport ownership
 
-Model latency exposed SDK 1.8.0 terminal idle-GET failure:
-`standalone SSE stream: exceeded 5 retries without progress`. Repeated closures
-ended the entire client; ADK reconnection changed stateful browser identity
-without requiring a pod restart. DisableStandaloneSSE retains stateful headers,
-JSON/SSE POST responses and legacy SSE transports, but withdraws unsolicited
-server messages/requests over standalone GET. Integrations needing those messages
-must revisit that policy. Actual SDK/HTTP-peer regression with 1 ms retry interval
-reproduces failure before correction and same-identity calls after the idle
-window afterward, in both POST-response modes without standalone GETs.
-
-Gateway 1.6.0 reaped inactive UUID sessions after 30 min and returned HTTP 400/plain
-`mcp: invalid session ID header` instead of required 404. Historical HTTP transport
-normalizes only that exact response to tools/list POST at its configured endpoint
-with UUID session header. Supplied client/auth/body are retained. SDK
-ErrSessionMissing lets ADK's bounded discovery initialize one fresh session and
-restart pagination; other statuses/bodies/methods/nonUUID sessions are unchanged.
-No tools/call, publication or browser action is replayed. Inspect uncertain effects.
-Fresh MCP identity creates fresh browser context: old tabs/ownership are not
-recovered. Native conversations and actor-memory artifacts retain their lifetimes.
-
-Real ADK/SDK boundary tests prove one discovery replacement and unchanged mutation
-failure. Optional TestLocalGatewayIdleDiscovery uses isolated pinned gateway/
-official adapter with config.mcp.sessionTtl: 1s and
-NATIVE_MCP_EXPIRY_ENDPOINT. It waits 32 s for the 30 s reaper, then rediscovers on the
-same toolset. Never target an estate gateway or use live credentials. The fixture
-observed actual 400 then repaired discovery; production TTL is unchanged.
+The existing MCP runtime owns client lifetime, reconnect policy and standalone
+SSE behavior. The artifact adapter transforms invocation results on that same
+managed relationship; it creates no production transport. Historical standalone
+HTTP discovery wrappers and their recipe-only tests are retired. Existing managed
+MCP regressions and cli_artifacts_test.go cover the current public boundary.
+No action, publication or failed tool call is replayed by image adaptation.
 
 ## Related execution contracts
 
