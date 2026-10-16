@@ -10,9 +10,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/kagent-dev/kagent/go/pkg/logging"
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+
+	"github.com/kagent-dev/kagent/go/pkg/logging"
 )
 
 // LifecycleAuthority resolves credentials already held by their provider without

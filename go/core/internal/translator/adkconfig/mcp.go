@@ -4,12 +4,14 @@ import (
 	"net/url"
 	"slices"
 
-	"github.com/kagent-dev/kagent/go/api/adk"
+	"google.golang.org/protobuf/types/known/durationpb"
+
+	configv1 "github.com/kagent-dev/kagent/go/api/gen/kagent/config/v1"
 	"github.com/kagent-dev/kagent/go/api/v1alpha3"
 	v2translator "github.com/kagent-dev/kagent/go/core/internal/translator"
 )
 
-func (c *Builder) addCLI(config *adk.AgentConfig, server *v1alpha3.RemoteMCPServer, binding v1alpha3.MCPToolBinding, headers map[string]string) error {
+func (c *Builder) addCLI(config *configv1.ADKAgentConfig, server *v1alpha3.RemoteMCPServer, binding v1alpha3.MCPToolBinding, headers map[string]string) error {
 	isSSE := server.Spec.Protocol == v1alpha3.RemoteMCPServerProtocolSse
 	if server.Spec.Protocol != "" && server.Spec.Protocol != v1alpha3.RemoteMCPServerProtocolStreamableHttp && !isSSE {
 		return v2translator.NewValidationError("MCP CLI binding %q requires Streamable HTTP or SSE", server.Name)
@@ -31,53 +33,53 @@ func (c *Builder) addCLI(config *adk.AgentConfig, server *v1alpha3.RemoteMCPServ
 		return v2translator.NewValidationError("MCP CLI binding %q requires a positive sseReadTimeout", server.Name)
 	}
 	// Reuse the native projection so HTTP settings retain one source of truth.
-	native := &adk.AgentConfig{}
+	native := &configv1.ADKAgentConfig{}
 	if err := c.addRemoteMCPServer(native, server, binding.Tools, binding.RequireApproval, headers); err != nil {
 		return err
 	}
-	cli := adk.MCPCLIConfig{Name: server.Name, Description: server.Spec.Description}
+	cli := &configv1.ADKMCPCLIConfig{Name: server.Name, Description: server.Spec.Description}
 	if isSSE {
-		cli.SSE = &native.SseTools[0]
-		cli.SSE.Tools = slices.Clone(binding.Tools)
+		cli.Sse = native.SseTools[0]
+		cli.Sse.Tools = slices.Clone(binding.Tools)
 	} else {
-		cli.HTTP = native.HttpTools[0]
-		cli.HTTP.Tools = slices.Clone(binding.Tools)
+		cli.Http = native.HttpTools[0]
+		cli.Http.Tools = slices.Clone(binding.Tools)
 	}
-	config.CLITools = append(config.CLITools, cli)
+	config.CliTools = append(config.CliTools, cli)
 	return nil
 }
 
 // addRemoteMCPServer translates the two remote protocols supported by the ADK.
 // This path intentionally has no proxy URL or egress-gateway indirection.
-func (c *Builder) addRemoteMCPServer(config *adk.AgentConfig, server *v1alpha3.RemoteMCPServer, tools []string, requireApproval bool, headers map[string]string) error {
+func (c *Builder) addRemoteMCPServer(config *configv1.ADKAgentConfig, server *v1alpha3.RemoteMCPServer, tools []string, requireApproval bool, headers map[string]string) error {
 	targetURL := server.Spec.URL
 
 	switch server.Spec.Protocol {
 	case v1alpha3.RemoteMCPServerProtocolSse:
-		params := adk.SseConnectionParams{Url: targetURL, Headers: headers}
+		params := &configv1.ADKSSEConnectionParams{Url: targetURL, Headers: headers}
 		if server.Spec.Timeout != nil {
-			params.Timeout = new(server.Spec.Timeout.Seconds())
+			params.Timeout = durationpb.New(server.Spec.Timeout.Duration)
 		}
 		if server.Spec.SseReadTimeout != nil {
-			params.SseReadTimeout = new(server.Spec.SseReadTimeout.Seconds())
+			params.SseReadTimeout = durationpb.New(server.Spec.SseReadTimeout.Duration)
 		}
-		params.TLSInsecureSkipVerify = tlsInsecureSkipVerify(server.Spec.TLS)
-		config.SseTools = append(config.SseTools, adk.SseMcpServerConfig{
+		params.TlsInsecureSkipVerify = tlsInsecureSkipVerify(server.Spec.TLS)
+		config.SseTools = append(config.SseTools, &configv1.ADKSSEMCPServerConfig{
 			Params: params, Tools: tools, RequireApproval: requireApproval,
 		})
 	default:
-		params := adk.StreamableHTTPConnectionParams{Url: targetURL, Headers: headers}
+		params := &configv1.ADKHTTPConnectionParams{Url: targetURL, Headers: headers}
 		if server.Spec.Timeout != nil {
-			params.Timeout = new(server.Spec.Timeout.Seconds())
+			params.Timeout = durationpb.New(server.Spec.Timeout.Duration)
 		}
 		if server.Spec.SseReadTimeout != nil {
-			params.SseReadTimeout = new(server.Spec.SseReadTimeout.Seconds())
+			params.SseReadTimeout = durationpb.New(server.Spec.SseReadTimeout.Duration)
 		}
 		if server.Spec.TerminateOnClose != nil {
 			params.TerminateOnClose = server.Spec.TerminateOnClose
 		}
-		params.TLSInsecureSkipVerify = tlsInsecureSkipVerify(server.Spec.TLS)
-		config.HttpTools = append(config.HttpTools, adk.HttpMcpServerConfig{
+		params.TlsInsecureSkipVerify = tlsInsecureSkipVerify(server.Spec.TLS)
+		config.HttpTools = append(config.HttpTools, &configv1.ADKHTTPMCPServerConfig{
 			Params: params, Tools: tools, RequireApproval: requireApproval,
 		})
 	}

@@ -1,10 +1,8 @@
 package translator_test
 
 import (
-	"encoding/json"
 	"testing"
 
-	"github.com/kagent-dev/kagent/go/api/adk"
 	"github.com/stretchr/testify/require"
 )
 
@@ -44,23 +42,22 @@ func TestMCPCLIBindingEditsProduceImmutableRevisions(t *testing.T) {
 			retainedID, err := old.Digest()
 			require.NoError(t, err)
 			require.Equal(t, oldID, retainedID)
-			var runtime adk.AgentConfig
-			require.NoError(t, json.Unmarshal(next.ConfigJSON, &runtime))
+			runtime := decodeCLIConfig(t, next.ConfigJSON)
 			switch change {
 			case "selection":
-				require.Equal(t, []string{"fetch"}, runtime.CLITools[0].HTTP.Tools)
+				require.Equal(t, []string{"fetch"}, runtime.CliTools[0].Http.Tools)
 			case "presentation":
-				require.Empty(t, runtime.CLITools)
+				require.Empty(t, runtime.CliTools)
 				require.Len(t, runtime.HttpTools, 1)
 			case "removal":
-				require.Empty(t, runtime.CLITools)
+				require.Empty(t, runtime.CliTools)
 				require.Empty(t, runtime.HttpTools)
 			case "rename":
-				require.Equal(t, "renamed", runtime.CLITools[0].Name)
+				require.Equal(t, "renamed", runtime.CliTools[0].Name)
 			case "endpoint":
-				require.Equal(t, server.Spec.URL, runtime.CLITools[0].HTTP.Params.Url)
+				require.Equal(t, server.Spec.URL, runtime.CliTools[0].Http.Params.Url)
 			case "description":
-				require.Equal(t, server.Spec.Description, runtime.CLITools[0].Description)
+				require.Equal(t, server.Spec.Description, runtime.CliTools[0].Description)
 			}
 		})
 	}

@@ -9,14 +9,17 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/kagent-dev/kagent/go/adk/pkg/models"
-	"github.com/kagent-dev/kagent/go/api/adk"
-	"github.com/kagent-dev/kagent/go/api/v1alpha3"
-	"github.com/kagent-dev/kagent/go/core/internal/egress"
-	"github.com/kagent-dev/kagent/go/core/internal/translator"
+	"google.golang.org/protobuf/encoding/protojson"
 	"istio.io/istio/pkg/kube/krt"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
+
+	runtimeconfig "github.com/kagent-dev/kagent/go/adk/pkg/config"
+	"github.com/kagent-dev/kagent/go/adk/pkg/models"
+	configv1 "github.com/kagent-dev/kagent/go/api/gen/kagent/config/v1"
+	"github.com/kagent-dev/kagent/go/api/v1alpha3"
+	"github.com/kagent-dev/kagent/go/core/internal/egress"
+	"github.com/kagent-dev/kagent/go/core/internal/translator"
 )
 
 // provenanceEntry records a non-secret Kubernetes input to a compiled revision.
@@ -42,7 +45,7 @@ func NewBuilder(ctx krt.HandlerContext, collections translator.Collections) *Bui
 }
 
 type Result struct {
-	Config      *adk.AgentConfig
+	Config      *configv1.ADKAgentConfig
 	Models      []*translator.ResolvedModelConfig
 	Templates   []*translator.TemplateConfiguration
 	Environment []corev1.EnvVar
@@ -84,7 +87,7 @@ func (c *Builder) Build(ctx context.Context, input *translator.HarnessInput) (*R
 	}
 	// The Python runtime needs an async SQLite driver; the Go runtime accepts
 	// this URL and strips the driver before opening the same durable database.
-	result.Config.SessionDBURL = "sqlite+aiosqlite:////data/sessions.db"
+	result.Config.SessionDbUrl = "sqlite+aiosqlite:////data/sessions.db"
 	return result, nil
 }
 
@@ -106,13 +109,13 @@ func (c *Builder) compileAgent(ctx context.Context, input *translator.AgentInput
 	if modelConfig != nil && modelConfig.Spec.Stream != nil {
 		stream = modelConfig.Spec.Stream
 	}
-	cfg := &adk.AgentConfig{Model: modelRuntime.Model, Description: input.Template.Spec.Description, Instruction: input.Instruction, Stream: stream}
+	cfg := &configv1.ADKAgentConfig{Model: modelRuntime.Model, Description: input.Template.Spec.Description, Instruction: input.Instruction, Stream: stream}
 	pluginConfig, pluginEgress, err := translator.CompileSkillResources(input.Template)
 	if err != nil {
 		return nil, err
 	}
 	if len(pluginConfig.Skills) > 0 || len(pluginConfig.Plugins) > 0 {
-		cfg.AgentPlugins = &pluginConfig
+		cfg.AgentPlugins = runtimeconfig.PluginConfig(pluginConfig)
 	}
 	for _, tool := range input.MCPTools {
 		headers, credentialEnv, err := c.resolveAgentTemplateHeaders(ctx, input.Template.Namespace, tool.Server.Spec.HeadersFrom)
@@ -305,22 +308,22 @@ func DedupeEnv(values []corev1.EnvVar) []corev1.EnvVar {
 // agentConfigDestinations extracts the network allowlist required by the
 // resolved model and MCP configuration. Provider defaults are included when
 // no explicit endpoint appears in the serialized model.
-func agentConfigDestinations(cfg *adk.AgentConfig, modelConfig *v1alpha3.ModelConfig, model adk.Model) []string {
+func agentConfigDestinations(cfg *configv1.ADKAgentConfig, modelConfig *v1alpha3.ModelConfig, model *configv1.ADKModelConfig) []string {
 	destinations := make([]string, 0, len(cfg.HttpTools)+len(cfg.SseTools)+1)
 	for _, tool := range cfg.HttpTools {
 		destinations = appendURLOrigin(destinations, tool.Params.Url)
 	}
-	for _, binding := range cfg.CLITools {
-		if binding.SSE != nil {
-			destinations = appendURLOrigin(destinations, binding.SSE.Params.Url)
+	for _, binding := range cfg.CliTools {
+		if binding.Sse != nil {
+			destinations = appendURLOrigin(destinations, binding.Sse.Params.Url)
 		} else {
-			destinations = appendURLOrigin(destinations, binding.HTTP.Params.Url)
+			destinations = appendURLOrigin(destinations, binding.Http.Params.Url)
 		}
 	}
 	for _, tool := range cfg.SseTools {
 		destinations = appendURLOrigin(destinations, tool.Params.Url)
 	}
-	modelJSON, _ := json.Marshal(model)
+	modelJSON, _ := protojson.Marshal(model)
 	var values any
 	if json.Unmarshal(modelJSON, &values) == nil {
 		destinations = appendURLValues(destinations, values)

@@ -17,15 +17,17 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kagent-dev/kagent/go/adk/pkg/models"
-	runtimeRunner "github.com/kagent-dev/kagent/go/adk/pkg/runner"
-	"github.com/kagent-dev/kagent/go/api/adk"
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/require"
 	adkagent "google.golang.org/adk/v2/agent"
 	adkrunner "google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/genai"
+
+	"github.com/kagent-dev/kagent/go/adk/pkg/models"
+	runtimeRunner "github.com/kagent-dev/kagent/go/adk/pkg/runner"
+	"github.com/kagent-dev/kagent/go/api/adk"
+	configv1 "github.com/kagent-dev/kagent/go/api/gen/kagent/config/v1"
 )
 
 func TestStandaloneCommandReportsRefusedTerminationOnStderr(t *testing.T) {
@@ -184,14 +186,14 @@ func TestRunnerProviderAuthorityAuthenticatesOwnedShutdown(t *testing.T) {
 				host, stop := context.WithCancel(t.Context())
 				defer stop()
 				sessions := session.InMemoryService()
-				agentConfig := &adk.AgentConfig{Model: &adk.OpenAI{BaseModel: adk.BaseModel{Type: adk.ModelTypeOpenAI, Model: "fixture"}, BaseUrl: model.URL}}
-				binding := adk.HttpMcpServerConfig{Params: adk.StreamableHTTPConnectionParams{Url: remote.URL}, Tools: []string{"read"}}
+				agentConfig := &configv1.ADKAgentConfig{Model: &configv1.ADKModelConfig{Model: "fixture", Provider: &configv1.ADKModelConfig_Openai{Openai: &configv1.ADKOpenAI{BaseUrl: model.URL}}}}
+				binding := &configv1.ADKHTTPMCPServerConfig{Params: &configv1.ADKHTTPConnectionParams{Url: remote.URL}, Tools: []string{"read"}}
 				if command {
-					agentConfig.CLITools = []adk.MCPCLIConfig{{Name: "owned", HTTP: binding}}
+					agentConfig.CliTools = []*configv1.ADKMCPCLIConfig{{Name: "owned", Http: binding}}
 				} else {
-					agentConfig.HttpTools = []adk.HttpMcpServerConfig{binding}
+					agentConfig.HttpTools = []*configv1.ADKHTTPMCPServerConfig{binding}
 				}
-				config, err := runtimeRunner.CreateRunnerConfig(host, agentConfig, sessions, "provider-shutdown", nil, nil)
+				config, err := runtimeRunner.CreateRunnerConfig(host, &configv1.ADKConfig{Agent: agentConfig, Runtime: &configv1.ADKRuntimeConfig{TokenPropagation: &configv1.TokenPropagationConfig{Enabled: true, StsWellKnownUri: optionalCLIString(os.Getenv("KAGENT_STS_WELL_KNOWN_URI"))}}}, sessions, "provider-shutdown", nil, nil)
 				require.NoError(t, err)
 				runner, err := adkrunner.New(config)
 				require.NoError(t, err)
@@ -238,4 +240,11 @@ func TestRunnerProviderAuthorityAuthenticatesOwnedShutdown(t *testing.T) {
 			})
 		}
 	}
+}
+
+func optionalCLIString(value string) *string {
+	if value == "" {
+		return nil
+	}
+	return &value
 }

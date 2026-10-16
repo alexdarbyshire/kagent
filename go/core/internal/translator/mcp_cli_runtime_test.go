@@ -16,14 +16,15 @@ import (
 
 	a2atype "github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
-	runtimea2a "github.com/kagent-dev/kagent/go/adk/pkg/a2a"
-	runtimeRunner "github.com/kagent-dev/kagent/go/adk/pkg/runner"
-	"github.com/kagent-dev/kagent/go/api/adk"
-	"github.com/kagent-dev/kagent/go/api/v1alpha3"
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+
+	runtimea2a "github.com/kagent-dev/kagent/go/adk/pkg/a2a"
+	runtimeRunner "github.com/kagent-dev/kagent/go/adk/pkg/runner"
+	configv1 "github.com/kagent-dev/kagent/go/api/gen/kagent/config/v1"
+	"github.com/kagent-dev/kagent/go/api/v1alpha3"
 )
 
 func TestCompiledMCPCLIExecutesThroughA2AWithoutSkills(t *testing.T) {
@@ -144,8 +145,7 @@ func runCompiledMCPCLIFixture(t *testing.T, withSkills, mixed bool) {
 	model.Spec.OpenAI = &v1alpha3.OpenAIConfig{BaseURL: modelHTTP.URL}
 	result, err := cliCompiler(t, harness, model, remoteMCPServer("browser", mcpHTTP.URL), remoteMCPServer("native", mcpHTTP.URL)).CompileAgent(t.Context(), inlineAgent(harness, template))
 	require.NoError(t, err)
-	var config adk.AgentConfig
-	require.NoError(t, json.Unmarshal(result.ConfigJSON, &config))
+	config := decodeCLIConfig(t, result.ConfigJSON)
 	if withSkills {
 		config.SkillsDirectory = t.TempDir()
 		require.NoError(t, os.Mkdir(filepath.Join(config.SkillsDirectory, "sample"), 0o700))
@@ -153,7 +153,7 @@ func runCompiledMCPCLIFixture(t *testing.T, withSkills, mixed bool) {
 	}
 	runtimeContext, cancelRuntime := context.WithCancel(t.Context())
 	defer cancelRuntime()
-	runnerConfig, err := runtimeRunner.CreateRunnerConfig(runtimeContext, &config, nil, "cli_runtime", nil, nil)
+	runnerConfig, err := runtimeRunner.CreateRunnerConfig(runtimeContext, &configv1.ADKConfig{Agent: config}, nil, "cli_runtime", nil, nil)
 	require.NoError(t, err)
 	executor, err := runtimea2a.NewKAgentExecutor(runtimea2a.KAgentExecutorConfig{RunnerConfig: runnerConfig, AppName: "cli_runtime", Logger: slog.New(slog.DiscardHandler)})
 	require.NoError(t, err)

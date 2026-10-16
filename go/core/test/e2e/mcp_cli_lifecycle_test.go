@@ -11,9 +11,6 @@ import (
 	"time"
 
 	a2atype "github.com/a2aproject/a2a-go/v2/a2a"
-	apiv1alpha1 "github.com/kagent-dev/kagent/go/api/gen/kagent/api/v1alpha1"
-	"github.com/kagent-dev/kagent/go/api/v1alpha3"
-	"github.com/kagent-dev/kagent/go/core/internal/substrate"
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
@@ -23,6 +20,10 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/util/retry"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
+
+	apiv1 "github.com/kagent-dev/kagent/go/api/gen/kagent/api/v1"
+	"github.com/kagent-dev/kagent/go/api/v1alpha3"
+	"github.com/kagent-dev/kagent/go/core/internal/substrate"
 )
 
 // Data restore starts fresh containers under the same Actor identity. The
@@ -158,7 +159,7 @@ func TestMCPCLIRevisionLifecycle(t *testing.T) {
 	}
 	require.Contains(t, send(old, "capture"), "called:old_tool")
 	assertActorSuspended(t, old)
-	before, err := old.sessions.GetSession(old.ctx, &apiv1alpha1.GetSessionRequest{SessionId: old.sessionID})
+	before, err := old.sessions.GetSession(old.ctx, &apiv1.GetSessionRequest{SessionId: old.sessionID})
 	require.NoError(t, err)
 	actor, err := findSubstrateActor(old.ctx, old.system, "", substrate.ActorName(old.sessionID))
 	require.NoError(t, err)
@@ -193,22 +194,22 @@ func TestMCPCLIRevisionLifecycle(t *testing.T) {
 	// The Actor's automatic Data suspension can precede durable settlement.
 	// Retry only the public precondition while that idle operation completes.
 	require.NoError(t, wait.PollUntilContextTimeout(old.ctx, 100*time.Millisecond, time.Minute, true, func(ctx context.Context) (bool, error) {
-		response, err := old.sessions.SuspendSession(ctx, &apiv1alpha1.SuspendSessionRequest{SessionId: old.sessionID})
+		response, err := old.sessions.SuspendSession(ctx, &apiv1.SuspendSessionRequest{SessionId: old.sessionID})
 		if status.Code(err) == codes.FailedPrecondition {
 			return false, nil
 		}
 		if err != nil {
 			return false, err
 		}
-		return response.GetSession().GetState() == apiv1alpha1.RuntimeState_RUNTIME_STATE_SUSPENDED, nil
+		return response.GetSession().GetState() == apiv1.RuntimeState_RUNTIME_STATE_SUSPENDED, nil
 	}))
-	resumed, err := old.sessions.ResumeSession(old.ctx, &apiv1alpha1.ResumeSessionRequest{SessionId: old.sessionID})
+	resumed, err := old.sessions.ResumeSession(old.ctx, &apiv1.ResumeSessionRequest{SessionId: old.sessionID})
 	require.NoError(t, err)
-	require.Equal(t, apiv1alpha1.RuntimeState_RUNTIME_STATE_READY, resumed.GetSession().GetState())
+	require.Equal(t, apiv1.RuntimeState_RUNTIME_STATE_READY, resumed.GetSession().GetState())
 	require.EqualValues(t, 2, calls.Load(), "Resume must not replay either Session's completed call")
-	resumed, err = old.sessions.ResumeSession(old.ctx, &apiv1alpha1.ResumeSessionRequest{SessionId: old.sessionID})
+	resumed, err = old.sessions.ResumeSession(old.ctx, &apiv1.ResumeSessionRequest{SessionId: old.sessionID})
 	require.NoError(t, err)
-	require.Equal(t, apiv1alpha1.RuntimeState_RUNTIME_STATE_READY, resumed.GetSession().GetState())
+	require.Equal(t, apiv1.RuntimeState_RUNTIME_STATE_READY, resumed.GetSession().GetState())
 	require.EqualValues(t, 2, calls.Load(), "repeated Resume is idempotent and must not replay calls")
 	restored := send(old, "restored")
 	require.Contains(t, restored, "restored")
@@ -216,7 +217,7 @@ func TestMCPCLIRevisionLifecycle(t *testing.T) {
 	require.Contains(t, restored, "LIVE_CATALOG_CHANGED")
 	require.NotContains(t, restored, "new_tool")
 	require.EqualValues(t, 3, calls.Load(), "Data restore must not replay completed calls")
-	after, err := old.sessions.GetSession(old.ctx, &apiv1alpha1.GetSessionRequest{SessionId: old.sessionID})
+	after, err := old.sessions.GetSession(old.ctx, &apiv1.GetSessionRequest{SessionId: old.sessionID})
 	require.NoError(t, err)
 	require.Equal(t, before.GetSession().GetPreparedRevision(), after.GetSession().GetPreparedRevision())
 	actor, err = findSubstrateActor(old.ctx, old.system, "", substrate.ActorName(old.sessionID))

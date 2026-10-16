@@ -17,11 +17,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/kagent-dev/kagent/go/api/adk"
-	"github.com/kagent-dev/kagent/go/pkg/logging"
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	schemaValidator "github.com/santhosh-tekuri/jsonschema/v6"
+	"google.golang.org/protobuf/types/known/durationpb"
+
+	"github.com/kagent-dev/kagent/go/api/adk"
+	"github.com/kagent-dev/kagent/go/pkg/logging"
 )
 
 // cliBinding is a private runtime input, not a model-authored connection API.
@@ -117,20 +119,20 @@ func openCLISession(ctx context.Context, binding cliBinding, headers *cliCommand
 	if params.TLSDisableSystemCAs != nil && *params.TLSDisableSystemCAs && (params.TLSCACertPath == nil || *params.TLSCACertPath == "") {
 		return nil, errors.New("tls_disable_system_cas requires tls_ca_cert_path")
 	}
-	if params.SseReadTimeout != nil && (*params.SseReadTimeout <= 0 || math.IsInf(*params.SseReadTimeout, 0) || math.IsNaN(*params.SseReadTimeout) || *params.SseReadTimeout >= float64(math.MaxInt64)/float64(time.Second)) {
+	if params.SseReadTimeout != nil && (params.SseReadTimeout.CheckValid() != nil || params.SseReadTimeout.AsDuration() <= 0) {
 		return nil, errors.New("MCP SSE read timeout must be positive and finite")
 	}
 	timeout := defaultTimeout
 	if params.Timeout != nil {
-		if *params.Timeout <= 0 || math.IsInf(*params.Timeout, 0) || math.IsNaN(*params.Timeout) || *params.Timeout >= float64(math.MaxInt64)/float64(time.Second) {
+		if params.Timeout.CheckValid() != nil || params.Timeout.AsDuration() <= 0 {
 			return nil, errors.New("MCP timeout must be positive")
 		}
-		timeout = time.Duration(*params.Timeout * float64(time.Second))
+		timeout = params.Timeout.AsDuration()
 	}
 	if params.ServerType == "sse" && params.SseReadTimeout != nil {
 		// Native SSE keeps its GET alive for the larger configured timeout.
 		// The command budget must not cut that stream off earlier.
-		timeout = max(timeout, time.Duration(*params.SseReadTimeout*float64(time.Second)))
+		timeout = max(timeout, params.SseReadTimeout.AsDuration())
 	}
 	var cancel context.CancelFunc
 	if headers == nil {
@@ -310,10 +312,10 @@ func runCLICommand(ctx context.Context, binding cliBinding, args []string, stdin
 func cliConnection(binding cliBinding) (mcpServerParams, []string, bool) {
 	if binding.SSE != nil {
 		p := binding.SSE.Params
-		return mcpServerParams{URL: p.Url, ServerType: "sse", Headers: p.Headers, Timeout: p.Timeout, SseReadTimeout: p.SseReadTimeout, TLSInsecureSkipVerify: p.TLSInsecureSkipVerify, TLSCACertPath: p.TLSCACertPath, TLSDisableSystemCAs: p.TLSDisableSystemCAs}, binding.SSE.Tools, binding.SSE.RequireApproval
+		return mcpServerParams{URL: p.Url, ServerType: "sse", Headers: p.Headers, Timeout: cliDuration(p.Timeout), SseReadTimeout: cliDuration(p.SseReadTimeout), TLSInsecureSkipVerify: p.TLSInsecureSkipVerify, TLSCACertPath: p.TLSCACertPath, TLSDisableSystemCAs: p.TLSDisableSystemCAs}, binding.SSE.Tools, binding.SSE.RequireApproval
 	}
 	p := binding.HTTP.Params
-	return mcpServerParams{URL: p.Url, ServerType: "http", Headers: p.Headers, Timeout: p.Timeout, SseReadTimeout: p.SseReadTimeout, TLSInsecureSkipVerify: p.TLSInsecureSkipVerify, TLSCACertPath: p.TLSCACertPath, TLSDisableSystemCAs: p.TLSDisableSystemCAs}, binding.HTTP.Tools, binding.HTTP.RequireApproval
+	return mcpServerParams{URL: p.Url, ServerType: "http", Headers: p.Headers, Timeout: cliDuration(p.Timeout), SseReadTimeout: cliDuration(p.SseReadTimeout), TLSInsecureSkipVerify: p.TLSInsecureSkipVerify, TLSCACertPath: p.TLSCACertPath, TLSDisableSystemCAs: p.TLSDisableSystemCAs}, binding.HTTP.Tools, binding.HTTP.RequireApproval
 }
 
 // This projection chooses ordinary flag types; the full raw schema validates
@@ -775,4 +777,14 @@ func readCLIInput(ctx context.Context, reader io.ReadCloser) ([]byte, error) {
 		err = errors.Join(err, ctx.Err(), <-closed)
 	}
 	return data, err
+}
+
+func cliDuration(value *float64) *durationpb.Duration {
+	if value == nil {
+		return nil
+	}
+	if *value <= 0 || math.IsNaN(*value) || math.IsInf(*value, 0) || *value >= float64(math.MaxInt64)/float64(time.Second) {
+		return durationpb.New(-time.Second)
+	}
+	return durationpb.New(time.Duration(*value * float64(time.Second)))
 }

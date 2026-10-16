@@ -2,6 +2,7 @@ package agent_test
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -9,19 +10,20 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kagent-dev/kagent/go/adk/pkg/agent"
-	"github.com/kagent-dev/kagent/go/api/adk"
 	"github.com/stretchr/testify/require"
+
+	"github.com/kagent-dev/kagent/go/adk/pkg/agent"
+	configv1 "github.com/kagent-dev/kagent/go/api/gen/kagent/config/v1"
 )
 
 func TestCreateGoogleADKAgentCLIRequiresPackagedBridge(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
-	root := &adk.AgentConfig{
-		CLITools: []adk.MCPCLIConfig{{Name: "browser", HTTP: adk.HttpMcpServerConfig{
-			Params: adk.StreamableHTTPConnectionParams{Url: "https://browser.example/mcp"},
+	root := &configv1.ADKAgentConfig{
+		CliTools: []*configv1.ADKMCPCLIConfig{{Name: "browser", Http: &configv1.ADKHTTPMCPServerConfig{
+			Params: &configv1.ADKHTTPConnectionParams{Url: "https://browser.example/mcp"},
 		}}},
 	}
-	created, err := agent.CreateGoogleADKAgent(t.Context(), root, "root", nil)
+	created, err := agent.CreateGoogleADKAgent(t.Context(), &configv1.ADKConfig{Agent: root}, "root", nil)
 	require.Nil(t, created)
 	require.ErrorContains(t, err, "failed to find packaged MCP CLI bridge")
 }
@@ -39,18 +41,18 @@ func TestCreateGoogleADKAgentCLIFailureRemovesPartialTree(t *testing.T) {
 	t.Setenv("TMPDIR", temporary)
 	for _, failure := range []string{"agent_construction", "materialization"} {
 		t.Run(failure, func(t *testing.T) {
-			root := &adk.AgentConfig{
-				Model:     &adk.OpenAI{BaseModel: adk.BaseModel{Type: adk.ModelTypeOpenAI, Model: "fixture"}},
-				CLITools:  []adk.MCPCLIConfig{{Name: "browser", HTTP: adk.HttpMcpServerConfig{Params: adk.StreamableHTTPConnectionParams{Url: "https://browser.example/mcp"}}}},
-				SubAgents: []*adk.AgentConfig{{Name: "missing_model", CLITools: []adk.MCPCLIConfig{{Name: "browser", HTTP: adk.HttpMcpServerConfig{Params: adk.StreamableHTTPConnectionParams{Url: "https://child.example/mcp"}}}}}},
+			root := &configv1.ADKAgentConfig{
+				Model:     &configv1.ADKModelConfig{Model: "fixture", Provider: &configv1.ADKModelConfig_Openai{Openai: &configv1.ADKOpenAI{}}},
+				CliTools:  []*configv1.ADKMCPCLIConfig{{Name: "browser", Http: &configv1.ADKHTTPMCPServerConfig{Params: &configv1.ADKHTTPConnectionParams{Url: "https://browser.example/mcp"}}}},
+				SubAgents: []*configv1.ADKAgentConfig{{Name: "missing_model", CliTools: []*configv1.ADKMCPCLIConfig{{Name: "browser", Http: &configv1.ADKHTTPMCPServerConfig{Params: &configv1.ADKHTTPConnectionParams{Url: "https://child.example/mcp"}}}}}},
 			}
 			expectedError := "model configuration is required"
 			if failure == "materialization" {
 				root.SubAgents[0].Model = root.Model
-				root.SubAgents[0].CLITools[0].HTTP.Params.Url = ""
+				root.SubAgents[0].CliTools[0].Http.Params.Url = ""
 				expectedError = "requires one HTTP or SSE transport"
 			}
-			_, err := agent.CreateGoogleADKAgent(t.Context(), root, "root", nil)
+			_, err := agent.CreateGoogleADKAgent(t.Context(), &configv1.ADKConfig{Agent: root}, "root", nil)
 			require.ErrorContains(t, err, expectedError)
 			entries, err := os.ReadDir(temporary)
 			require.NoError(t, err)
@@ -60,10 +62,10 @@ func TestCreateGoogleADKAgentCLIFailureRemovesPartialTree(t *testing.T) {
 			// Retry the same root inputs after correcting the failed Shared config. CLI
 			// startup never needs the previous partial tree or remote tool side effects.
 			root.SubAgents[0].Model = root.Model
-			root.SubAgents[0].CLITools[0].HTTP.Params.Url = "https://child.example/mcp"
+			root.SubAgents[0].CliTools[0].Http.Params.Url = "https://child.example/mcp"
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
-			created, err := agent.CreateGoogleADKAgent(ctx, root, "root", nil)
+			created, err := agent.CreateGoogleADKAgent(ctx, &configv1.ADKConfig{Agent: root}, "root", nil)
 			require.NoError(t, err)
 			require.Len(t, created.SubAgents(), 1)
 			entries, err = os.ReadDir(temporary)
@@ -83,6 +85,20 @@ func TestCreateGoogleADKAgentCLIFailureRemovesPartialTree(t *testing.T) {
 			}
 			cancel()
 			require.Eventually(t, func() bool { _, err := os.Stat(tree); return os.IsNotExist(err) }, time.Second, 10*time.Millisecond)
+		})
+	}
+}
+
+func TestCreateGoogleADKAgentCLIRejectsDisabledBash(t *testing.T) {
+	for _, shared := range []bool{false, true} {
+		t.Run(fmt.Sprintf("shared=%t", shared), func(t *testing.T) {
+			root := &configv1.ADKAgentConfig{CliTools: []*configv1.ADKMCPCLIConfig{{Name: "browser", Http: &configv1.ADKHTTPMCPServerConfig{Params: &configv1.ADKHTTPConnectionParams{Url: "https://browser.example/mcp"}}}}}
+			if shared {
+				root = &configv1.ADKAgentConfig{SubAgents: []*configv1.ADKAgentConfig{root}}
+			}
+			created, err := agent.CreateGoogleADKAgent(t.Context(), &configv1.ADKConfig{Agent: root, Runtime: &configv1.ADKRuntimeConfig{SkillTools: &configv1.SkillToolsConfig{DisableBash: true}}}, "root", nil)
+			require.Nil(t, created)
+			require.ErrorContains(t, err, "disable_bash is enabled")
 		})
 	}
 }

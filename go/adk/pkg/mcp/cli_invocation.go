@@ -14,9 +14,10 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel/propagation"
+
 	"github.com/kagent-dev/kagent/go/api/adk"
 	"github.com/kagent-dev/kagent/go/pkg/logging"
-	"go.opentelemetry.io/otel/propagation"
 )
 
 // cliInvocationSocket is the private subprocess handoff location. Its value

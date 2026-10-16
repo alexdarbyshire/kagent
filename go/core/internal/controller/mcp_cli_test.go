@@ -1,18 +1,19 @@
 package controller
 
 import (
-	"encoding/json"
 	"testing"
 
 	atev1alpha1 "github.com/agent-substrate/substrate/pkg/api/v1alpha1"
-	"github.com/kagent-dev/kagent/go/api/adk"
-	"github.com/kagent-dev/kagent/go/api/v1alpha3"
-	v2translator "github.com/kagent-dev/kagent/go/core/internal/translator"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/encoding/protojson"
 	"istio.io/istio/pkg/kube/krt"
 	"istio.io/istio/pkg/kube/krt/krttest"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	configv1 "github.com/kagent-dev/kagent/go/api/gen/kagent/config/v1"
+	"github.com/kagent-dev/kagent/go/api/v1alpha3"
+	v2translator "github.com/kagent-dev/kagent/go/core/internal/translator"
 )
 
 func TestMCPCLIPreparationWithoutImageRegistration(t *testing.T) {
@@ -20,7 +21,7 @@ func TestMCPCLIPreparationWithoutImageRegistration(t *testing.T) {
 	t.Cleanup(func() { close(stop) })
 	opts := krt.NewOptionsBuilder(stop, "mcp-cli", nil)
 	h := &v1alpha3.Harness{ObjectMeta: metav1.ObjectMeta{Namespace: "test", Name: "go"}, Spec: v1alpha3.HarnessSpec{
-		Kagent: &v1alpha3.KagentHarness{}, Workload: v1alpha3.HarnessWorkload{Image: "example.com/go@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+		Kagent: &v1alpha3.KagentHarness{}, Workload: v1alpha3.HarnessWorkload{Image: new("example.com/go@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")},
 		Substrate: v1alpha3.RuntimeSubstratePolicy{WorkerPoolRef: corev1.LocalObjectReference{Name: "default"}},
 	}}
 	a := &v1alpha3.AgentTemplate{ObjectMeta: metav1.ObjectMeta{Namespace: "test", Name: "agent"}, Spec: v1alpha3.AgentTemplateSpec{
@@ -38,11 +39,10 @@ func TestMCPCLIPreparationWithoutImageRegistration(t *testing.T) {
 	collections := v2translator.Collections{Harnesses: krttest.GetMockCollection[*v1alpha3.Harness](mock), AgentTemplates: templates, ResolvedModelConfigs: models,
 		RemoteMCPServers: krttest.GetMockCollection[*v1alpha3.RemoteMCPServer](mock), ConfigMaps: configMaps, Secrets: secrets, WorkerPools: krttest.GetMockCollection[*atev1alpha1.WorkerPool](mock)}
 	observations := krttest.GetMockCollection[AgentRuntimeObservation](mock)
-	prepared := newAgentReconciliations(agents, collections, observations, opts)
+	prepared := newAgentReconciliations(agents, collections, observations, opts, testRuntimeDefaults(), nil)
 	waitFor(t, func() bool { state := prepared.GetKey("test/agent"); return state != nil && state.Target != nil })
-	var config adk.AgentConfig
-	require.NoError(t, json.Unmarshal(prepared.GetKey("test/agent").Target.Revision.ConfigJSON, &config))
-	require.Len(t, config.CLITools, 1)
+	config := decodeCLIConfig(t, prepared.GetKey("test/agent").Target.Revision.ConfigJSON)
+	require.Len(t, config.CliTools, 1)
 	require.Empty(t, config.HttpTools)
 	updated := a.DeepCopy()
 	updated.Spec.Tools[0].MCP.RequireApproval = true
@@ -55,4 +55,12 @@ func TestMCPCLIPreparationWithoutImageRegistration(t *testing.T) {
 	require.Nil(t, state.Target)
 	require.Equal(t, "UnsupportedConfiguration", state.CompilationFailure.Reason)
 	require.Contains(t, state.CompilationFailure.Message, "requireApproval")
+}
+
+func decodeCLIConfig(t *testing.T, data []byte) *configv1.ADKAgentConfig {
+	t.Helper()
+	var config configv1.ADKConfig
+	require.NoError(t, protojson.Unmarshal(data, &config))
+	require.NotNil(t, config.Agent)
+	return config.Agent
 }

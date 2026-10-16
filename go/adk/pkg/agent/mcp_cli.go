@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/kagent-dev/kagent/go/api/adk"
+	configv1 "github.com/kagent-dev/kagent/go/api/gen/kagent/config/v1"
 	"github.com/kagent-dev/kagent/go/pkg/logging"
 )
 
@@ -18,21 +19,24 @@ import (
 // command directories. Success transfers cleanup to the runtime context.
 type cliScopes struct {
 	directory string
-	agents    map[*adk.AgentConfig]string
+	agents    map[*configv1.ADKAgentConfig]string
 }
 
-func materializeCLI(root *adk.AgentConfig, invocationHeaders bool) (_ *cliScopes, err error) {
-	scopes := &cliScopes{agents: map[*adk.AgentConfig]string{}}
-	var agents []*adk.AgentConfig
-	var visit func(*adk.AgentConfig) error
-	visit = func(config *adk.AgentConfig) error {
+func materializeCLI(root *configv1.ADKAgentConfig, invocationHeaders, disableBash bool) (_ *cliScopes, err error) {
+	scopes := &cliScopes{agents: map[*configv1.ADKAgentConfig]string{}}
+	var agents []*configv1.ADKAgentConfig
+	var visit func(*configv1.ADKAgentConfig) error
+	visit = func(config *configv1.ADKAgentConfig) error {
 		if config == nil {
 			return errors.New("agent config is required")
 		}
-		if err := adk.ValidateCLICommands(config.CLITools); err != nil {
+		if err := adk.ValidateCLICommands(adk.CLIBindings(config)); err != nil {
 			return err
 		}
-		if len(config.CLITools) > 0 {
+		if len(adk.CLIBindings(config)) > 0 {
+			if disableBash {
+				return errors.New("MCP CLI exposure requires Bash; disable_bash is enabled")
+			}
 			agents = append(agents, config)
 		}
 		for _, child := range config.SubAgents {
@@ -71,7 +75,7 @@ func materializeCLI(root *adk.AgentConfig, invocationHeaders bool) (_ *cliScopes
 		if err := os.MkdirAll(bin, 0o700); err != nil {
 			return nil, fmt.Errorf("failed to create MCP command directory: %w", err)
 		}
-		for _, binding := range config.CLITools {
+		for _, binding := range adk.CLIBindings(config) {
 			if err := binding.ValidateTransport(); err != nil {
 				return nil, err
 			}
