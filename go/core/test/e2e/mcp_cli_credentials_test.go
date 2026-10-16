@@ -17,9 +17,6 @@ import (
 
 	a2atype "github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/google/uuid"
-	apiv1alpha1 "github.com/kagent-dev/kagent/go/api/gen/kagent/api/v1alpha1"
-	"github.com/kagent-dev/kagent/go/api/v1alpha3"
-	"github.com/kagent-dev/kagent/go/core/internal/substrate"
 	"github.com/kagent-dev/mockllm"
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/require"
@@ -27,6 +24,10 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	apiv1 "github.com/kagent-dev/kagent/go/api/gen/kagent/api/v1"
+	"github.com/kagent-dev/kagent/go/api/v1alpha3"
+	"github.com/kagent-dev/kagent/go/core/internal/substrate"
 )
 
 // Exercise the recording fixtures independently so a broken test origin cannot
@@ -126,11 +127,11 @@ func TestMCPCLICredentialRouting(t *testing.T) {
 				require.Contains(t, taskText(task), "result is 8")
 				// The public inventory exposes the compiled runtime template. Inspect
 				// that exact Session's template, rather than an unrelated manifest.
-				system := apiv1alpha1.NewSystemServiceClient(newControllerConn(t, interactionTarget(t)))
+				system := apiv1.NewSystemServiceClient(newControllerConn(t, interactionTarget(t)))
 				actor, err := findSubstrateActor(fixture.ctx, system, "", substrate.ActorName(fixture.sessionID))
 				require.NoError(t, err)
 				require.NotNil(t, actor)
-				compiled, err := system.GetSubstrateSummary(fixture.ctx, &apiv1alpha1.GetSubstrateSummaryRequest{Namespace: "kagent", Atespace: actor.GetActorTemplate().GetAtespace()})
+				compiled, err := system.GetSubstrateSummary(fixture.ctx, &apiv1.GetSubstrateSummaryRequest{Namespace: "kagent", Atespace: actor.GetActorTemplate().GetAtespace()})
 				require.NoError(t, err)
 				require.Empty(t, compiled.GetAteApiError())
 				found := false

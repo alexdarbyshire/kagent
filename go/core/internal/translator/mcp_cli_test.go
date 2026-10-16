@@ -6,28 +6,30 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kagent-dev/kagent/go/api/adk"
-	"github.com/kagent-dev/kagent/go/api/v1alpha3"
-	v2translator "github.com/kagent-dev/kagent/go/core/internal/translator"
-	kagenttranslator "github.com/kagent-dev/kagent/go/core/internal/translator/kagent"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/encoding/protojson"
 	"istio.io/istio/pkg/kube/krt"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	configv1 "github.com/kagent-dev/kagent/go/api/gen/kagent/config/v1"
+	"github.com/kagent-dev/kagent/go/api/v1alpha3"
+	v2translator "github.com/kagent-dev/kagent/go/core/internal/translator"
+	kagenttranslator "github.com/kagent-dev/kagent/go/core/internal/translator/kagent"
 )
 
 func TestCompileAgentCLIRequiresDigestPinnedGoImage(t *testing.T) {
 	var binding v1alpha3.MCPToolBinding
 	require.NoError(t, json.Unmarshal([]byte(`{"server":{"kind":"RemoteMCPServer","name":"browser"},"exposeAsCLI":true}`), &binding))
 	harness := &v1alpha3.Harness{ObjectMeta: metav1.ObjectMeta{Name: "go", Namespace: "test"}, Spec: v1alpha3.HarnessSpec{
-		Kagent: &v1alpha3.KagentHarness{}, Workload: v1alpha3.HarnessWorkload{Image: "example.com/go:latest"},
+		Kagent: &v1alpha3.KagentHarness{}, Workload: v1alpha3.HarnessWorkload{Image: new("example.com/go:latest")},
 		Substrate: v1alpha3.RuntimeSubstratePolicy{WorkerPoolRef: corev1.LocalObjectReference{Name: "default"}},
 	}}
 	template := &v1alpha3.AgentTemplate{ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: "test"}, Spec: v1alpha3.AgentTemplateSpec{
 		ModelConfig: &corev1.LocalObjectReference{Name: "default-model"}, Tools: []v1alpha3.ToolBinding{{MCP: &binding}},
 	}}
 	_, err := compiler(t, harness, modelConfig(), remoteMCPServer("browser", "http://browser.example/mcp")).CompileAgent(t.Context(), inlineAgent(harness, template))
-	require.ErrorContains(t, err, "requires an exact digest-pinned Go image")
+	require.ErrorContains(t, err, "pinned by sha256 digest")
 }
 
 func TestCompileAgentCLIReplacesNativeAndRetainsEgress(t *testing.T) {
@@ -36,19 +38,12 @@ func TestCompileAgentCLIReplacesNativeAndRetainsEgress(t *testing.T) {
 	server.Spec.Description = "Browse documents"
 	result, err := cliCompiler(t, harness, modelConfig(), server).CompileAgent(t.Context(), inlineAgent(harness, template))
 	require.NoError(t, err)
-	var runtime struct {
-		CLI []struct {
-			Name string                  `json:"name"`
-			HTTP adk.HttpMcpServerConfig `json:"http"`
-		} `json:"cli_tools"`
-		HTTP []adk.HttpMcpServerConfig `json:"http_tools"`
-	}
-	require.NoError(t, json.Unmarshal(result.ConfigJSON, &runtime))
-	require.Len(t, runtime.CLI, 1)
-	require.Empty(t, runtime.HTTP)
-	require.Equal(t, "browser", runtime.CLI[0].Name)
-	require.Equal(t, server.Spec.URL, runtime.CLI[0].HTTP.Params.Url)
-	require.Equal(t, []string{"navigate"}, runtime.CLI[0].HTTP.Tools)
+	runtime := decodeCLIConfig(t, result.ConfigJSON)
+	require.Len(t, runtime.CliTools, 1)
+	require.Empty(t, runtime.HttpTools)
+	require.Equal(t, "browser", runtime.CliTools[0].Name)
+	require.Equal(t, server.Spec.URL, runtime.CliTools[0].Http.Params.Url)
+	require.Equal(t, []string{"navigate"}, runtime.CliTools[0].Http.Tools)
 	require.Contains(t, result.EgressDestinations, "http://browser.example:8080")
 	require.Equal(t, harness.Spec.Workload.Args, result.Args)
 }
@@ -62,27 +57,22 @@ func TestCompileAgentCLISSEAndInvocationAuthentication(t *testing.T) {
 	server.Spec.SseReadTimeout = &metav1.Duration{Duration: 10 * time.Second}
 	result, err := cliCompiler(t, harness, modelConfig(), server).CompileAgent(t.Context(), inlineAgent(harness, template))
 	require.NoError(t, err)
-	var config map[string]json.RawMessage
-	require.NoError(t, json.Unmarshal(result.ConfigJSON, &config))
-	var bindings []struct {
-		HTTP adk.HttpMcpServerConfig `json:"http"`
-		SSE  *adk.SseMcpServerConfig `json:"sse"`
-	}
-	require.NoError(t, json.Unmarshal(config["cli_tools"], &bindings))
+	config := decodeCLIConfig(t, result.ConfigJSON)
+	bindings := config.CliTools
 	require.Len(t, bindings, 1)
-	require.Empty(t, bindings[0].HTTP.Params.Url)
-	require.NotNil(t, bindings[0].SSE)
-	require.Equal(t, server.Spec.URL, bindings[0].SSE.Params.Url)
-	require.Equal(t, 3.0, *bindings[0].SSE.Params.Timeout)
-	require.Equal(t, 10.0, *bindings[0].SSE.Params.SseReadTimeout)
-	require.Equal(t, []string{"navigate"}, bindings[0].SSE.Tools)
-	require.Empty(t, config["sse_tools"])
+	require.Nil(t, bindings[0].Http)
+	require.NotNil(t, bindings[0].Sse)
+	require.Equal(t, server.Spec.URL, bindings[0].Sse.Params.Url)
+	require.Equal(t, 3*time.Second, bindings[0].Sse.Params.Timeout.AsDuration())
+	require.Equal(t, 10*time.Second, bindings[0].Sse.Params.SseReadTimeout.AsDuration())
+	require.Equal(t, []string{"navigate"}, bindings[0].Sse.Tools)
+	require.Empty(t, config.SseTools)
 	require.Contains(t, result.EgressDestinations, "http://browser.example:8080")
 }
 
 func cliConfiguration() (*v1alpha3.Harness, *v1alpha3.AgentTemplate) {
 	harness := &v1alpha3.Harness{ObjectMeta: metav1.ObjectMeta{Name: "go", Namespace: "test"}, Spec: v1alpha3.HarnessSpec{
-		Kagent: &v1alpha3.KagentHarness{}, Workload: v1alpha3.HarnessWorkload{Image: "example.com/go@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Args: []string{"--log-level", "debug"}},
+		Kagent: &v1alpha3.KagentHarness{}, Workload: v1alpha3.HarnessWorkload{Image: new("example.com/go@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), Args: []string{"--log-level", "debug"}},
 		Substrate: v1alpha3.RuntimeSubstratePolicy{WorkerPoolRef: corev1.LocalObjectReference{Name: "default"}},
 	}}
 	template := &v1alpha3.AgentTemplate{ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: "test"}, Spec: v1alpha3.AgentTemplateSpec{
@@ -98,8 +88,8 @@ func cliCompiler(t *testing.T, harness *v1alpha3.Harness, objects ...any) *v2tra
 	collections := mockCollections(t, append(objects, defaultWorkerPool(), harness)...)
 	ctx := krt.TestingDummyContext{}
 	return v2translator.NewCompiler(ctx, collections, map[v2translator.HarnessType]v2translator.HarnessCompiler{
-		v2translator.HarnessTypeKagent: kagenttranslator.NewCompiler(ctx, collections),
-	})
+		v2translator.HarnessTypeKagent: kagenttranslator.NewCompiler(ctx, collections, testRuntimeDefaults()),
+	}, testHarnessImages)
 }
 
 func TestCompileAgentCLIRejectsUnsupportedAndCollidingBindings(t *testing.T) {
@@ -125,8 +115,8 @@ func TestCompileAgentCLIRejectsUnsupportedAndCollidingBindings(t *testing.T) {
 			h.Spec.Workload.Command = []string{"kagent-adk"}
 		}, "entrypoint"},
 		{"unpinned", func(h *v1alpha3.Harness, _ *v1alpha3.AgentTemplate, _ *v1alpha3.RemoteMCPServer) {
-			h.Spec.Workload.Image = "example.com/go:latest"
-		}, "digest-pinned"},
+			h.Spec.Workload.Image = new("example.com/go:latest")
+		}, "pinned by sha256 digest"},
 		{"duplicate", func(_ *v1alpha3.Harness, a *v1alpha3.AgentTemplate, _ *v1alpha3.RemoteMCPServer) {
 			a.Spec.Tools = append(a.Spec.Tools, *a.Spec.Tools[0].DeepCopy())
 		}, "collision"},
@@ -172,13 +162,12 @@ func TestCompileAgentCLISharedAndReferencedConfiguration(t *testing.T) {
 			}
 			revision, err := compile()
 			require.NoError(t, err)
-			var config adk.AgentConfig
-			require.NoError(t, json.Unmarshal(revision.ConfigJSON, &config))
-			require.Len(t, config.CLITools, 1)
+			config := decodeCLIConfig(t, revision.ConfigJSON)
+			require.Len(t, config.CliTools, 1)
 			require.Len(t, config.HttpTools, 1)
 			require.True(t, config.HttpTools[0].RequireApproval, "native approval remains supported")
 			require.Len(t, config.SubAgents, 1)
-			require.Len(t, config.SubAgents[0].CLITools, 1, "same command names in Shared children are independent")
+			require.Len(t, config.SubAgents[0].CliTools, 1, "same command names in Shared children are independent")
 			require.Empty(t, config.SubAgents[0].HttpTools)
 			child.Spec.Tools[0].MCP.RequireApproval = true
 			_, err = compile()
@@ -193,9 +182,8 @@ func TestCompileAgentCLIFalseAndUnsupportedHarnesses(t *testing.T) {
 		a.Spec.Tools[0].MCP.ExposeAsCLI = exposure
 		result, err := compiler(t, h, modelConfig(), remoteMCPServer("browser", "https://browser.example/mcp")).CompileAgent(t.Context(), inlineAgent(h, a))
 		require.NoError(t, err)
-		var config adk.AgentConfig
-		require.NoError(t, json.Unmarshal(result.ConfigJSON, &config))
-		require.Empty(t, config.CLITools)
+		config := decodeCLIConfig(t, result.ConfigJSON)
+		require.Empty(t, config.CliTools)
 		require.Len(t, config.HttpTools, 1)
 	}
 	for _, runtime := range []string{"python", "codex", "claude", "byo"} {
@@ -220,4 +208,12 @@ func TestCompileAgentCLIFalseAndUnsupportedHarnesses(t *testing.T) {
 			require.ErrorAs(t, err, &validation)
 		})
 	}
+}
+
+func decodeCLIConfig(t *testing.T, data []byte) *configv1.ADKAgentConfig {
+	t.Helper()
+	var config configv1.ADKConfig
+	require.NoError(t, protojson.Unmarshal(data, &config))
+	require.NotNil(t, config.Agent)
+	return config.Agent
 }

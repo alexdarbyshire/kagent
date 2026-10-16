@@ -5,9 +5,10 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/kagent-dev/kagent/go/api/v1alpha3"
 	"github.com/kagent-dev/kagent/go/core/internal/substrate"
-	"github.com/stretchr/testify/require"
 )
 
 func TestBootstrapCapabilitiesReachActorAndRevisionIdentity(t *testing.T) {

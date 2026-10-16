@@ -161,7 +161,6 @@ func TestResolvePathContainment(t *testing.T) {
 
 func TestNewExecutionTools_ReturnsExpectedToolSet(t *testing.T) {
 	skillsDir := t.TempDir()
-	t.Setenv("KAGENT_ENABLE_FILE_SEARCH_TOOLS", "true")
 	skillDir := filepath.Join(skillsDir, "demo")
 	if err := os.MkdirAll(skillDir, 0755); err != nil {
 		t.Fatalf("failed to create skill dir: %v", err)
@@ -174,7 +173,7 @@ description: Demo skill.
 		t.Fatalf("failed to write skill metadata: %v", err)
 	}
 
-	tools, err := NewExecutionTools(ExecutionConfig{SkillsDirectory: skillsDir})
+	tools, err := NewSkillExecutionTools(skillsDir, true, false)
 	if err != nil {
 		t.Fatalf("NewExecutionTools() error = %v", err)
 	}
@@ -193,9 +192,8 @@ description: Demo skill.
 
 func TestNewExecutionTools_OmitsListFilesAndGrepFileByDefault(t *testing.T) {
 	skillsDir := t.TempDir()
-	t.Setenv("KAGENT_ENABLE_FILE_SEARCH_TOOLS", "")
 
-	tools, err := NewExecutionTools(ExecutionConfig{SkillsDirectory: skillsDir})
+	tools, err := NewSkillExecutionTools(skillsDir, false, false)
 	if err != nil {
 		t.Fatalf("NewExecutionTools() error = %v, want nil (list_files/grep_file should be omitted, not fatal)", err)
 	}
@@ -207,7 +205,7 @@ func TestNewExecutionTools_OmitsListFilesAndGrepFileByDefault(t *testing.T) {
 
 	for _, name := range []string{"read_file", "write_file", "edit_file", "bash"} {
 		if !got[name] {
-			t.Errorf("expected tool %q to be present even without KAGENT_ENABLE_FILE_SEARCH_TOOLS", name)
+			t.Errorf("expected tool %q to be present when file search tools are disabled", name)
 		}
 	}
 	if got["list_files"] {
@@ -218,7 +216,35 @@ func TestNewExecutionTools_OmitsListFilesAndGrepFileByDefault(t *testing.T) {
 	}
 }
 
-func TestNewExecutionTools_BashDescriptionMentionsFileSearchToolsOnlyWhenEnabled(t *testing.T) {
+func TestNewSkillExecutionTools_DisableBashPreservesFileTools(t *testing.T) {
+	for _, fileSearchEnabled := range []bool{false, true} {
+		t.Run(fmt.Sprintf("file_search=%t", fileSearchEnabled), func(t *testing.T) {
+			tools, err := NewSkillExecutionTools(t.TempDir(), fileSearchEnabled, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := map[string]bool{}
+			for _, tool := range tools {
+				got[tool.Name()] = true
+			}
+			for _, name := range []string{"read_file", "write_file", "edit_file"} {
+				if !got[name] {
+					t.Errorf("expected tool %q to remain available", name)
+				}
+			}
+			if got["bash"] {
+				t.Error("expected bash to be omitted")
+			}
+			for _, name := range []string{"list_files", "grep_file"} {
+				if got[name] != fileSearchEnabled {
+					t.Errorf("tool %q present = %t, want %t", name, got[name], fileSearchEnabled)
+				}
+			}
+		})
+	}
+}
+
+func TestNewSkillExecutionTools_BashDescriptionMentionsFileSearchToolsOnlyWhenEnabled(t *testing.T) {
 	skillsDir := t.TempDir()
 
 	findBash := func(t *testing.T, tools []tool.Tool) tool.Tool {
@@ -233,8 +259,7 @@ func TestNewExecutionTools_BashDescriptionMentionsFileSearchToolsOnlyWhenEnabled
 	}
 
 	t.Run("disabled by default", func(t *testing.T) {
-		t.Setenv("KAGENT_ENABLE_FILE_SEARCH_TOOLS", "")
-		tools, err := NewExecutionTools(ExecutionConfig{SkillsDirectory: skillsDir})
+		tools, err := NewSkillExecutionTools(skillsDir, false, false)
 		if err != nil {
 			t.Fatalf("NewExecutionTools() error = %v", err)
 		}
@@ -245,8 +270,7 @@ func TestNewExecutionTools_BashDescriptionMentionsFileSearchToolsOnlyWhenEnabled
 	})
 
 	t.Run("mentioned when enabled", func(t *testing.T) {
-		t.Setenv("KAGENT_ENABLE_FILE_SEARCH_TOOLS", "true")
-		tools, err := NewExecutionTools(ExecutionConfig{SkillsDirectory: skillsDir})
+		tools, err := NewSkillExecutionTools(skillsDir, true, false)
 		if err != nil {
 			t.Fatalf("NewExecutionTools() error = %v", err)
 		}
@@ -265,9 +289,8 @@ func TestNewExecutionTools_BashDescriptionMentionsFileSearchToolsOnlyWhenEnabled
 func TestListFilesAndGrepFileTools_RunThroughADK(t *testing.T) {
 	t.Setenv("TMPDIR", t.TempDir())
 	skillsDir := t.TempDir()
-	t.Setenv("KAGENT_ENABLE_FILE_SEARCH_TOOLS", "true")
 
-	tools, err := NewExecutionTools(ExecutionConfig{SkillsDirectory: skillsDir})
+	tools, err := NewSkillExecutionTools(skillsDir, true, false)
 	if err != nil {
 		t.Fatalf("NewExecutionTools() error = %v", err)
 	}

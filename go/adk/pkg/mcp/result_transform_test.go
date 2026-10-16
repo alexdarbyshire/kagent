@@ -12,10 +12,11 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/kagent-dev/kagent/go/adk/pkg/tools"
-	"github.com/kagent-dev/kagent/go/api/adk"
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/require"
+
+	"github.com/kagent-dev/kagent/go/adk/pkg/tools"
+	"github.com/kagent-dev/kagent/go/api/adk"
 )
 
 func TestCommandResultAdapterReceivesCurrentCallerAndNeverReplaysFailure(t *testing.T) {

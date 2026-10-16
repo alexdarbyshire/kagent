@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/kagent-dev/kagent/go/core/pkg/env"
 	adkagent "google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/tool/functiontool"
@@ -132,8 +131,10 @@ type grepFileInput struct {
 
 // ExecutionConfig scopes local execution to one agent's skills and MCP commands.
 type ExecutionConfig struct {
-	SkillsDirectory  string
-	CommandDirectory string
+	FileSearchEnabled bool
+	DisableBash       bool
+	SkillsDirectory   string
+	CommandDirectory  string
 	// PrepareEnvironment receives the original invocation and a bounded command
 	// lifetime. The returned cleanup releases private execution resources.
 	PrepareEnvironment func(context.Context, context.Context) ([]string, func(), error)
@@ -142,6 +143,7 @@ type ExecutionConfig struct {
 // NewExecutionTools creates the existing filesystem and Bash tools when skills
 // or MCP commands need local execution. Skills are discovered by ADK's toolset.
 func NewExecutionTools(config ExecutionConfig) ([]tool.Tool, error) {
+	fileSearchEnabled, disableBash := config.FileSearchEnabled, config.DisableBash
 	skillsDirectory := strings.TrimSpace(config.SkillsDirectory)
 	if skillsDirectory == "" && config.CommandDirectory == "" {
 		return nil, nil
@@ -158,8 +160,6 @@ func NewExecutionTools(config ExecutionConfig) ([]tool.Tool, error) {
 			return nil, fmt.Errorf("failed to access skills directory %q: %w", absSkillsDir, err)
 		}
 	}
-
-	commandExecutor := NewCommandExecutor(config)
 
 	readFileTool, err := functiontool.New(functiontool.Config{
 		Name:        "read_file",
@@ -219,9 +219,7 @@ func NewExecutionTools(config ExecutionConfig) ([]tool.Tool, error) {
 	tools := []tool.Tool{readFileTool, writeFileTool, editFileTool}
 
 	// list_files/grep_file are opt-in: they give an agent broad filesystem
-	// visibility, so deployments enable them deliberately. Note this gate is
-	// theirs alone -- bash below is always registered.
-	fileSearchEnabled := env.KagentEnableFileSearchTools.Get()
+	// visibility, so deployments enable them deliberately.
 	if fileSearchEnabled {
 		listFilesTool, err := functiontool.New(functiontool.Config{
 			Name:        "list_files",
@@ -288,6 +286,11 @@ func NewExecutionTools(config ExecutionConfig) ([]tool.Tool, error) {
 		tools = append(tools, listFilesTool, grepFileTool)
 	}
 
+	if disableBash {
+		return tools, nil
+	}
+
+	commandExecutor := NewCommandExecutor(config)
 	desc := bashDescription
 	if fileSearchEnabled {
 		desc += fileSearchToolsBashHint
@@ -450,4 +453,8 @@ func resolvePathWithExistingParents(path string) (string, error) {
 		}
 		current = parent
 	}
+}
+
+func NewSkillExecutionTools(skillsDirectory string, fileSearchEnabled, disableBash bool) ([]tool.Tool, error) {
+	return NewExecutionTools(ExecutionConfig{SkillsDirectory: skillsDirectory, FileSearchEnabled: fileSearchEnabled, DisableBash: disableBash})
 }

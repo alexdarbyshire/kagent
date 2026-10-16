@@ -11,7 +11,7 @@ var cliImageReference = regexp.MustCompile(`^[^[:space:]@]+@sha256:[a-f0-9]{64}$
 
 // ValidateCLIExposure validates CLI bindings before harness compilation.
 // The Go runtime checks for its packaged bridge during agent construction.
-func ValidateCLIExposure(input *HarnessInput) error {
+func ValidateCLIExposure(input *HarnessInput, disableBash bool) error {
 	if input == nil || input.Harness == nil || input.Root == nil {
 		return NewValidationError("MCP CLI validation requires resolved Harness and agent inputs")
 	}
@@ -28,8 +28,11 @@ func ValidateCLIExposure(input *HarnessInput) error {
 			if harnessType(input.Harness) != HarnessTypeKagent {
 				return NewValidationError("MCP CLI binding %q requires the CLI-enabled kagent Go runtime; %s is unsupported", binding.Server.Name, harnessType(input.Harness))
 			}
+			if disableBash {
+				return NewValidationError("MCP CLI binding %q requires Bash; disable_bash is enabled", binding.Server.Name)
+			}
 			image := input.Harness.Spec.Workload.Image
-			if !cliImageReference.MatchString(image) {
+			if image != nil && !cliImageReference.MatchString(*image) {
 				return NewValidationError("MCP CLI binding %q requires an exact digest-pinned Go image", binding.Server.Name)
 			}
 			command := input.Harness.Spec.Workload.Command

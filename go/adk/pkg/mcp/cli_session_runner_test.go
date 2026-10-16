@@ -17,14 +17,15 @@ import (
 	"testing"
 	"time"
 
-	runtimeRunner "github.com/kagent-dev/kagent/go/adk/pkg/runner"
-	"github.com/kagent-dev/kagent/go/api/adk"
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/require"
 	adkagent "google.golang.org/adk/v2/agent"
 	adkrunner "google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/genai"
+
+	runtimeRunner "github.com/kagent-dev/kagent/go/adk/pkg/runner"
+	configv1 "github.com/kagent-dev/kagent/go/api/gen/kagent/config/v1"
 )
 
 func TestNativeCLICommandsKeepScopedSessionAndCloseOnActorShutdown(t *testing.T) {
@@ -155,18 +156,18 @@ func newScopedBrowserRunnerFixture(t *testing.T, cli bool, remoteURL string, for
 	owner, cancel := context.WithCancel(t.Context())
 	t.Cleanup(cancel)
 	sessions := session.InMemoryService()
-	agentConfig := &adk.AgentConfig{
-		Model:    &adk.OpenAI{BaseModel: adk.BaseModel{Type: adk.ModelTypeOpenAI, Model: "fixture"}, BaseUrl: model.URL},
-		CLITools: []adk.MCPCLIConfig{{Name: "browser", HTTP: adk.HttpMcpServerConfig{Params: adk.StreamableHTTPConnectionParams{Url: remoteURL}, Tools: []string{"create", "read", "close", "mutate"}}}},
+	agentConfig := &configv1.ADKAgentConfig{
+		Model:    &configv1.ADKModelConfig{Model: "fixture", Provider: &configv1.ADKModelConfig_Openai{Openai: &configv1.ADKOpenAI{BaseUrl: model.URL}}},
+		CliTools: []*configv1.ADKMCPCLIConfig{{Name: "browser", Http: &configv1.ADKHTTPMCPServerConfig{Params: &configv1.ADKHTTPConnectionParams{Url: remoteURL}, Tools: []string{"create", "read", "close", "mutate"}}}},
 	}
 	if len(forwardAuthority) > 0 && forwardAuthority[0] {
-		agentConfig.CLITools[0].HTTP.AllowedHeaders = []string{"Authorization"}
+		agentConfig.CliTools[0].Http.AllowedHeaders = []string{"Authorization"}
 	}
 	if !cli {
-		agentConfig.HttpTools = []adk.HttpMcpServerConfig{agentConfig.CLITools[0].HTTP}
-		agentConfig.CLITools = nil
+		agentConfig.HttpTools = []*configv1.ADKHTTPMCPServerConfig{agentConfig.CliTools[0].Http}
+		agentConfig.CliTools = nil
 	}
-	config, err := runtimeRunner.CreateRunnerConfig(owner, agentConfig, sessions, "native-cli", nil, nil)
+	config, err := runtimeRunner.CreateRunnerConfig(owner, &configv1.ADKConfig{Agent: agentConfig}, sessions, "native-cli", nil, nil)
 	require.NoError(t, err)
 	config.Agent = &fixtureScopeAgent{Agent: config.Agent}
 	runner, err := adkrunner.New(config)

@@ -18,9 +18,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kagent-dev/kagent/go/api/adk"
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/require"
+
+	"github.com/kagent-dev/kagent/go/api/adk"
 )
 
 func TestCommandExecutorReturnKillsBackgroundMCPBridge(t *testing.T) {

@@ -14,8 +14,9 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/kagent-dev/kagent/go/api/adk"
 	"go.opentelemetry.io/otel/propagation"
+
+	"github.com/kagent-dev/kagent/go/api/adk"
 )
 
 // Integrated commands send only arguments; binding and authority stay in the actor.

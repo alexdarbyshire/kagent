@@ -8,13 +8,13 @@ import (
 
 	a2atype "github.com/a2aproject/a2a-go/v2/a2a"
 	a2apb "github.com/a2aproject/a2a-go/v2/a2apb/v1"
-
 	atev1alpha1 "github.com/agent-substrate/substrate/pkg/api/v1alpha1"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
-	"github.com/kagent-dev/kagent/go/core/internal/translator"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
 	corev1 "k8s.io/api/core/v1"
+
+	"github.com/kagent-dev/kagent/go/core/internal/translator"
 )
 
 func TestActorTemplateSandboxClass(t *testing.T) {
@@ -96,7 +96,7 @@ func TestActorTemplateForRevision(t *testing.T) {
 	if template.GetSandboxConfig().GetSandboxClass() != ateapipb.SandboxClass_SANDBOX_CLASS_GVISOR || template.GetSandboxConfig().GetConfigName() != "gvisor-default" || container.GetWakeupProbe().GetHttpGet().GetPath() != "/readyz" || container.GetWakeupProbe().GetHttpGet().GetPort() != 8081 || container.GetWakeupProbe().GetTimeoutSeconds() != 30 {
 		t.Fatalf("unexpected runtime contract: %+v", template)
 	}
-	require.Equal(t, ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL, template.GetSnapshotConfig().GetOnCommit())
+	require.Equal(t, ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA, template.GetSnapshotConfig().GetOnCommit())
 	environment := map[string]*ateapipb.EnvVar{}
 	for _, variable := range container.Env {
 		environment[variable.Name] = variable
@@ -127,33 +127,37 @@ func TestActorTemplateForRevision(t *testing.T) {
 }
 
 func TestActorTemplateStampsTheRevisionOnTheResource(t *testing.T) {
-	spec := &translator.Revision{
-		Namespace: "agents", AgentName: "helper", WorkerPoolName: "default",
-		AgentCard: &a2apb.AgentCard{Name: "helper", Version: "v1", Capabilities: &a2apb.AgentCapabilities{},
-			SupportedInterfaces: []*a2apb.AgentInterface{{Url: "http://127.0.0.1:80", ProtocolBinding: "GRPC", ProtocolVersion: "1.0"}},
-			DefaultInputModes:   []string{"text"}, DefaultOutputModes: []string{"text"}},
-		Environment: []corev1.EnvVar{{Name: "OTEL_RESOURCE_ATTRIBUTES", Value: "gen_ai.agent.name=helper-kagent,service.version=forged"}},
-	}
-	revisionID, err := spec.Digest()
-	if err != nil {
-		t.Fatal(err)
-	}
-	template, err := ActorTemplateForRevision(spec, revisionID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, variable := range template.GetContainers()[0].Env {
-		if variable.Name == "OTEL_RESOURCE_ATTRIBUTES" {
-			if want := "gen_ai.agent.name=helper-kagent,service.version=" + revisionID.Short(); variable.Value != want {
-				t.Fatalf("resource attributes = %q, want %q", variable.Value, want)
+	for _, test := range []struct {
+		name        string
+		environment []corev1.EnvVar
+		wantPrefix  string
+	}{
+		{name: "no resource environment"},
+		{name: "preserves attributes", environment: []corev1.EnvVar{{Name: "OTEL_RESOURCE_ATTRIBUTES", Value: "team=platform"}}, wantPrefix: "team=platform,"},
+		{name: "replaces forged version", environment: []corev1.EnvVar{{Name: "OTEL_RESOURCE_ATTRIBUTES", Value: "gen_ai.main_agent.name=helper-kagent,service.version=forged"}}, wantPrefix: "gen_ai.main_agent.name=helper-kagent,"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			spec := &translator.Revision{
+				Namespace: "agents", AgentName: "helper", WorkerPoolName: "default",
+				AgentCard: &a2apb.AgentCard{Name: "helper", Version: "v1", Capabilities: &a2apb.AgentCapabilities{},
+					SupportedInterfaces: []*a2apb.AgentInterface{{Url: "http://127.0.0.1:80", ProtocolBinding: "GRPC", ProtocolVersion: "1.0"}},
+					DefaultInputModes:   []string{"text"}, DefaultOutputModes: []string{"text"}},
+				Environment: slices.Clone(test.environment),
 			}
-			if spec.Environment[0].Value != "gen_ai.agent.name=helper-kagent,service.version=forged" {
-				t.Fatal("stamping the revision changed the compiled revision")
+			revisionID, err := spec.Digest()
+			require.NoError(t, err)
+			template, err := ActorTemplateForRevision(spec, revisionID)
+			require.NoError(t, err)
+			require.Equal(t, test.environment, spec.Environment, "stamping the revision must not change the compiled revision")
+			for _, variable := range template.GetContainers()[0].Env {
+				if variable.Name == "OTEL_RESOURCE_ATTRIBUTES" {
+					require.Equal(t, test.wantPrefix+"service.version="+revisionID.Short(), variable.Value)
+					return
+				}
 			}
-			return
-		}
+			t.Fatal("resource attributes missing from the actor")
+		})
 	}
-	t.Fatal("resource attributes missing from the actor")
 }
 
 func TestActorTemplateSpecEqualIgnoresServerFields(t *testing.T) {

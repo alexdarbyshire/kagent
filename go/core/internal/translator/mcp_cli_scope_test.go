@@ -18,13 +18,14 @@ import (
 
 	a2atype "github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
-	runtimea2a "github.com/kagent-dev/kagent/go/adk/pkg/a2a"
-	runtimeRunner "github.com/kagent-dev/kagent/go/adk/pkg/runner"
-	"github.com/kagent-dev/kagent/go/api/adk"
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	adkrunner "google.golang.org/adk/v2/runner"
+
+	runtimea2a "github.com/kagent-dev/kagent/go/adk/pkg/a2a"
+	runtimeRunner "github.com/kagent-dev/kagent/go/adk/pkg/runner"
+	configv1 "github.com/kagent-dev/kagent/go/api/gen/kagent/config/v1"
 )
 
 func TestMCPCLIRuntimeScopesRootAndSharedCommands(t *testing.T) {
@@ -99,14 +100,14 @@ func TestMCPCLIRuntimeScopesRootAndSharedCommands(t *testing.T) {
 		_, _ = fmt.Fprint(w, `{"id":"final","choices":[{"index":0,"message":{"role":"assistant","content":"complete"},"finish_reason":"stop"}]}`)
 	}))
 	defer modelHTTP.Close()
-	configFor := func(scope, endpoint string) *adk.AgentConfig {
-		return &adk.AgentConfig{Name: scope, Model: &adk.OpenAI{BaseModel: adk.BaseModel{Type: adk.ModelTypeOpenAI, Model: "fixture", Headers: map[string]string{"X-Scope": scope}}, BaseUrl: modelHTTP.URL}, CLITools: []adk.MCPCLIConfig{{Name: "browser", Description: "Scoped recording", HTTP: adk.HttpMcpServerConfig{Params: adk.StreamableHTTPConnectionParams{Url: endpoint}, Tools: []string{scope + "_record"}}}}}
+	configFor := func(scope, endpoint string) *configv1.ADKAgentConfig {
+		return &configv1.ADKAgentConfig{Name: scope, Model: &configv1.ADKModelConfig{Model: "fixture", Headers: map[string]string{"X-Scope": scope}, Provider: &configv1.ADKModelConfig_Openai{Openai: &configv1.ADKOpenAI{BaseUrl: modelHTTP.URL}}}, CliTools: []*configv1.ADKMCPCLIConfig{{Name: "browser", Description: "Scoped recording", Http: &configv1.ADKHTTPMCPServerConfig{Params: &configv1.ADKHTTPConnectionParams{Url: endpoint}, Tools: []string{scope + "_record"}}}}}
 	}
 	root := configFor("root", rootMCP.URL)
-	root.SubAgents = []*adk.AgentConfig{configFor("child", childMCP.URL)}
+	root.SubAgents = []*configv1.ADKAgentConfig{configFor("child", childMCP.URL)}
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	runnerConfig, err := runtimeRunner.CreateRunnerConfig(ctx, root, nil, "scoped", nil, nil)
+	runnerConfig, err := runtimeRunner.CreateRunnerConfig(ctx, &configv1.ADKConfig{Agent: root}, nil, "scoped", nil, nil)
 	require.NoError(t, err)
 	require.Equal(t, originalPATH, os.Getenv("PATH"), "materialization must not mutate process PATH")
 	executeScopes := func(ctx context.Context, config adkrunner.Config, appName string) {
@@ -163,7 +164,7 @@ func TestMCPCLIRuntimeScopesRootAndSharedCommands(t *testing.T) {
 	// tree. Rebuild both scopes and exercise them through the public A2A executor.
 	replacementCtx, cancelReplacement := context.WithCancel(t.Context())
 	defer cancelReplacement()
-	replacement, err := runtimeRunner.CreateRunnerConfig(replacementCtx, root, nil, "scoped_replacement", nil, nil)
+	replacement, err := runtimeRunner.CreateRunnerConfig(replacementCtx, &configv1.ADKConfig{Agent: root}, nil, "scoped_replacement", nil, nil)
 	require.NoError(t, err)
 	require.EqualValues(t, 2, rootCalls.Load(), "startup must not replay root calls")
 	require.EqualValues(t, 2, childCalls.Load(), "startup must not replay Shared calls")

@@ -9,11 +9,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kagent-dev/kagent/go/api/adk"
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/require"
 	adkagent "google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/tool/toolconfirmation"
+
+	configv1 "github.com/kagent-dev/kagent/go/api/gen/kagent/config/v1"
 )
 
 func TestNativeHostShutdownTerminatesOwnedConnection(t *testing.T) {
@@ -38,7 +39,7 @@ func TestNativeHostShutdownTerminatesOwnedConnection(t *testing.T) {
 	defer remote.Close()
 	owner, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	toolsets := CreateToolsets(owner, []adk.HttpMcpServerConfig{{Params: adk.StreamableHTTPConnectionParams{Url: remote.URL, Headers: map[string]string{"Authorization": "Bearer static"}}}}, nil, nil, false, nil)
+	toolsets := CreateToolsets(owner, []*configv1.ADKHTTPMCPServerConfig{{Params: &configv1.ADKHTTPConnectionParams{Url: remote.URL, Headers: map[string]string{"Authorization": "Bearer static"}}}}, nil, nil, false, nil)
 	require.Len(t, toolsets, 1)
 	tools, err := toolsets[0].Tools(testReadonlyContext{Context: t.Context()})
 	require.NoError(t, err)
@@ -98,7 +99,7 @@ func TestManagedShutdownReportsRemoteEvidence(t *testing.T) {
 			}))
 			defer remote.Close()
 			owner := NewClientLifecycle(t.Context(), nil)
-			toolsets := CreateToolsets(t.Context(), []adk.HttpMcpServerConfig{{Params: adk.StreamableHTTPConnectionParams{Url: remote.URL, Headers: map[string]string{"Authorization": "Bearer static"}}}}, nil, nil, false, nil, owner)
+			toolsets := CreateToolsets(t.Context(), []*configv1.ADKHTTPMCPServerConfig{{Params: &configv1.ADKHTTPConnectionParams{Url: remote.URL, Headers: map[string]string{"Authorization": "Bearer static"}}}}, nil, nil, false, nil, owner)
 			require.Len(t, toolsets, 1)
 			_, err := toolsets[0].Tools(testReadonlyContext{Context: t.Context()})
 			require.NoError(t, err)
@@ -136,7 +137,7 @@ func TestManagedShutdownBoundsManyHungRelationships(t *testing.T) {
 	}))
 	defer remote.Close()
 	owner := NewClientLifecycle(t.Context(), nil)
-	configs := make([]adk.HttpMcpServerConfig, 6)
+	configs := make([]*configv1.ADKHTTPMCPServerConfig, 6)
 	for index := range configs {
 		configs[index].Params.Url = remote.URL
 	}
@@ -179,7 +180,7 @@ func TestManagedShutdownRejectsInvocationOnlyAuthority(t *testing.T) {
 	}))
 	defer remote.Close()
 	owner := NewClientLifecycle(t.Context(), nil)
-	toolsets := CreateToolsets(t.Context(), []adk.HttpMcpServerConfig{{Params: adk.StreamableHTTPConnectionParams{Url: remote.URL}, AllowedHeaders: []string{"Authorization"}}}, nil, nil, false, nil, owner)
+	toolsets := CreateToolsets(t.Context(), []*configv1.ADKHTTPMCPServerConfig{{Params: &configv1.ADKHTTPConnectionParams{Url: remote.URL}, AllowedHeaders: []string{"Authorization"}}}, nil, nil, false, nil, owner)
 	invocation := a2aCtx(map[string][]string{"Authorization": {"Bearer forwarded"}})
 	tools, err := toolsets[0].Tools(testReadonlyContext{Context: invocation})
 	require.NoError(t, err)
@@ -214,7 +215,7 @@ func TestNativeSSEStreamOutlivesInvocationAndClosesWithHost(t *testing.T) {
 	defer remote.Close()
 	defer remote.CloseClientConnections()
 	owner := NewClientLifecycle(t.Context(), nil)
-	toolsets := CreateToolsets(t.Context(), nil, []adk.SseMcpServerConfig{{Params: adk.SseConnectionParams{Url: remote.URL, Headers: map[string]string{"Authorization": "Bearer static"}}}}, nil, false, nil, owner)
+	toolsets := CreateToolsets(t.Context(), nil, []*configv1.ADKSSEMCPServerConfig{{Params: &configv1.ADKSSEConnectionParams{Url: remote.URL, Headers: map[string]string{"Authorization": "Bearer static"}}}}, nil, false, nil, owner)
 	require.Len(t, toolsets, 1)
 	require.Eventually(t, func() bool { return finished.Load() == 1 }, time.Second, 10*time.Millisecond)
 	invocation, end := context.WithCancel(t.Context())

@@ -3,16 +3,8 @@ name: CI Build
 on:
   push:
     branches: [main, "release/**"]
-    paths:
-      - "**"
-      - "!**/*.md"
-      - "docs/env.md"
   pull_request:
     branches: [main, "release/**"]
-    paths:
-      - "**"
-      - "!**/*.md"
-      - "docs/env.md"
   merge_group:
   workflow_dispatch:
     inputs:
@@ -38,7 +30,7 @@ env:
   BUILDX_VERSION: v0.23.0
 jobs:
   setup:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       cache-key: ${{ steps.cache-key.outputs.key }}
     steps:
@@ -58,9 +50,9 @@ jobs:
       VERSION: v0.0.1-test
       SUBSTRATE_VERSION: 0.5.0-alpha2
       KIND_SANDBOX_CLASS: ${{ matrix.sandbox_class }}
-      # Keep the four-vCPU runner bounded; manual runs can compare higher concurrency.
+      # Bound runtime concurrency separately from the runner's build capacity.
       E2E_PARALLEL: ${{ inputs.e2e_parallel || '4' }}
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 40
     steps:
       - name: Checkout repository
@@ -82,7 +74,7 @@ jobs:
           restore-keys: |
             e2e-go-${{ runner.os }}-${{ runner.arch }}-
       - name: Allow unprivileged user namespaces
-        # Ubuntu 24.04 (ubuntu-latest) enables AppArmor-based restrictions on
+        # Ubuntu 24.04 enables AppArmor-based restrictions on
         # unprivileged user namespaces by default, which causes bubblewrap
         # to fail with EPERM on unshare(CLONE_NEWUSER)
         # See https://github.com/openai/codex/issues/14919
@@ -102,7 +94,7 @@ jobs:
 
       - name: Install Kind
         id: kind
-        uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2
+        uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa
         with:
           version: v0.33.0
           install_only: true
@@ -114,30 +106,6 @@ jobs:
         id: install-kagent
         env:
           OPENAI_API_KEY: fake
-          KAGENT_HELM_EXTRA_ARGS: >-
-            --set registry=localhost:5001
-            --set tag=${{ env.VERSION }}
-            --set imagePullPolicy=Always
-            --set controller.image.pullPolicy=Always
-            --set controller.service.type=LoadBalancer
-            --set ui.replicas=0
-            --set kmcp.enabled=false
-            --set kagent-tools.enabled=false
-            --set grafana-mcp.enabled=false
-            --set controller.push.allowHTTP=true
-            --set controller.push.allowPrivateNetworks=true
-            --set substrateWorkerPool.create=true
-            --set substrateWorkerPool.replicas=4
-            --set substrateWorkerPool.sandboxClass=${{ matrix.sandbox_class }}
-            --set substrateWorkerPool.workerImage=ghcr.io/kagent-dev/substrate/ateom-${{ matrix.sandbox_class }}:v${{ env.SUBSTRATE_VERSION }}
-            --set otel.traces.enabled=true
-            --set otel.metrics.enabled=true
-            --set otel.exporter.otlp.endpoint=http://e2e-otlp.kagent.svc.cluster.local:14317
-          KAGENT_SUBSTRATE_HELM_EXTRA_ARGS: >-
-            --set atelet.extraArgs[0]=--localhost-registry-replacement=kind-registry:5000
-            --set ateApi.extraArgs[0]=--template-resync-interval=250ms
-            --set credentialProvider.namespacePolicies[0].atespace=kagent
-            --set credentialProvider.namespacePolicies[0].allowedNamespaces[0]=kagent
         run: |
           # Reuse Blacksmith's persistent layers and Go cache mounts. The Makefile
           # otherwise selects a fresh local builder, discarding that cache.
@@ -145,8 +113,10 @@ jobs:
           test -n "$BUILDX_BUILDER_NAME"
           export BUILDX_BUILDER_NAME
           make buildx-create
+          mkdir -p "$RUNNER_TEMP/runtime-images"
           printf '%s\n' controller golang-adk claude-harness codex-harness byo-a2a sandbox-guest | xargs -P4 -n1 bash -c '
             image="$1"
+            RUNTIME_IMAGE_METADATA_DIR="$RUNNER_TEMP/runtime-images" \
             DOCKER_BUILD_ARGS="--platform=linux/amd64 --push" \
               make GIT_COMMIT=e2e BUILD_DATE=1970-01-01 "build-${image}"
           ' _
@@ -154,9 +124,81 @@ jobs:
           # from the controller pod. Substrate rewrites registry pulls on workers.
           GUEST_DIGEST=$(docker buildx imagetools inspect "localhost:5001/kagent-dev/kagent/sandbox-guest:${VERSION}" | awk '$1 == "Digest:" { print $2 }')
           test -n "$GUEST_DIGEST"
-          export KAGENT_HELM_EXTRA_ARGS="${KAGENT_HELM_EXTRA_ARGS} --set controller.sandbox.guestImage.digest=${GUEST_DIGEST}"
-          make build-cli-local helm-version
-          KAGENT_HELM_REPO=./helm/ KAGENT_HELM_VERSION="${VERSION}" ./go/core/bin/kagent-local install --namespace kagent
+          make build-cli-local helm-release RUNTIME_IMAGE_METADATA_DIR="$RUNNER_TEMP/runtime-images" RUNTIME_IMAGE_REPOSITORY=localhost:5001/kagent-dev/kagent
+          mkdir -p "$RUNNER_TEMP/release-charts"
+          tar -xzf "dist/kagent-${VERSION}.tgz" -C "$RUNNER_TEMP/release-charts"
+          tar -xzf "dist/kagent-crds-${VERSION}.tgz" -C "$RUNNER_TEMP/release-charts"
+          cat > "$RUNNER_TEMP/kagent-values.yaml" <<EOF
+          registry: localhost:5001
+          tag: "${VERSION}"
+          imagePullPolicy: Always
+          controller:
+            image:
+              pullPolicy: Always
+            service:
+              type: LoadBalancer
+            # Check startup promptly across restart tests, keeping a 60s budget.
+            startupProbe:
+              httpGet:
+                path: /health
+                port: http
+              periodSeconds: 1
+              failureThreshold: 60
+            readinessProbe:
+              httpGet:
+                path: /health
+                port: http
+              periodSeconds: 1
+          config:
+            push:
+              allowHttp: true
+              allowPrivateNetworks: true
+            sandboxes:
+              guestImage: "localhost:5001/kagent-dev/kagent/sandbox-guest@${GUEST_DIGEST}"
+            telemetry:
+              traces:
+                endpoint: http://e2e-otlp.kagent.svc.cluster.local:14317
+              metrics:
+                endpoint: http://e2e-otlp.kagent.svc.cluster.local:14317
+            runtimeDefaults:
+              tokenPropagation:
+                enabled: true
+              telemetry:
+                traces:
+                  endpoint: http://e2e-otlp.kagent.svc.cluster.local:14317
+                metrics:
+                  endpoint: http://e2e-otlp.kagent.svc.cluster.local:14317
+          ui:
+            replicas: 0
+          kagent-tools:
+            enabled: false
+          grafana-mcp:
+            enabled: false
+          substrateWorkerPool:
+            create: true
+            replicas: 4
+            sandboxClass: ${{ matrix.sandbox_class }}
+            workerImage: ghcr.io/kagent-dev/substrate/ateom-${{ matrix.sandbox_class }}:v${{ env.SUBSTRATE_VERSION }}
+          EOF
+          cat > "$RUNNER_TEMP/substrate-values.yaml" <<EOF
+          atelet:
+            resources:
+              limits:
+                memory: 2Gi
+            extraArgs: [--localhost-registry-replacement=kind-registry:5000]
+          ateApi:
+            extraArgs: [--template-resync-interval=250ms]
+          EOF
+          cat > "$RUNNER_TEMP/kagent-cli.yaml" <<EOF
+          install:
+            kagent:
+              repository: "${RUNNER_TEMP}/release-charts/"
+              version: "${VERSION}"
+              valuesFiles: ["${RUNNER_TEMP}/kagent-values.yaml"]
+            substrate:
+              valuesFiles: ["${RUNNER_TEMP}/substrate-values.yaml"]
+          EOF
+          ./go/core/bin/kagent-local --config "$RUNNER_TEMP/kagent-cli.yaml" install --namespace kagent
           kubectl rollout status deployment/kagent-controller -n kagent --timeout=120s
           kubectl wait --for=condition=Ready pod -l app.kubernetes.io/component=controller -n kagent --timeout=120s
 
@@ -196,12 +238,10 @@ jobs:
             sleep 5
           done
           test "$READY" = True
-          export KAGENT_API_URL="http://$(kubectl get svc -n kagent kagent-controller -o jsonpath='{.status.loadBalancer.ingress[0].ip}'):8083"
-          export KAGENT_GATEWAY_URL="$KAGENT_API_URL"
-          echo "KAGENT_API_URL: $KAGENT_API_URL"
+          export KAGENT_E2E_API_URL="http://$(kubectl get svc -n kagent kagent-controller -o jsonpath='{.status.loadBalancer.ingress[0].ip}'):8083"
+          echo "KAGENT_E2E_API_URL: $KAGENT_E2E_API_URL"
           make core/bin/kagent-local
           export KAGENT_E2E_CLI="$PWD/core/bin/kagent-local"
-          export KAGENT_E2E_API_URL="$KAGENT_API_URL"
           export KAGENT_E2E_LOCAL_HOST=172.17.0.1
           envsubst < core/test/e2e/manifests/tracing.yaml.tmpl | kubectl apply -f -
           # TestMain keeps the receiver alive for every runtime's response flush.
@@ -260,7 +300,7 @@ jobs:
 
   proto-check:
     name: Protobuf Contract Check
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -279,7 +319,7 @@ jobs:
 
   semconv-check:
     name: Telemetry Contract Check
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -386,7 +426,7 @@ jobs:
           kubectl logs -n kagent deployment/kagent-controller || true
 
   go-unit-tests:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -413,7 +453,7 @@ jobs:
   helm-unit-tests:
     env:
       VERSION: v0.0.1-test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -430,6 +470,10 @@ jobs:
       - name: Chart init
         run: |
           make helm-version
+
+      - name: Test release image packaging
+        # Validate packaged runtime defaults without accessing an image registry.
+        run: bash scripts/package-release-charts_test.sh
 
       - name: Run helm unit tests
         run: |
@@ -489,7 +533,7 @@ jobs:
         working-directory: ./ui
         run: yarn test:pw
 
-  # This job builds the Docker images for the controller, UI, ADKs, and CLI on arm64.
+  # Build component images and the CLI for amd64 and arm64.
   build:
     env:
       VERSION: v0.0.1-test
@@ -498,7 +542,6 @@ jobs:
         image:
           - controller
           - ui
-          - kagent-adk
           - cli
           - golang-adk
           - claude-harness
@@ -538,7 +581,7 @@ jobs:
         working-directory: ./
 
   go-lint:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -556,7 +599,7 @@ jobs:
   python-test:
     env:
       OPENAI_API_KEY: fake
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       matrix:
         python-version: ["3.11", "3.12", "3.13"]
@@ -583,7 +626,7 @@ jobs:
         run: make test
 
   python-lint:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -615,7 +658,7 @@ jobs:
           fi
 
   manifests-check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6

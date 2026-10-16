@@ -19,12 +19,14 @@ import (
 
 	a2atype "github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
-	runtimea2a "github.com/kagent-dev/kagent/go/adk/pkg/a2a"
-	runtimeRunner "github.com/kagent-dev/kagent/go/adk/pkg/runner"
-	"github.com/kagent-dev/kagent/go/api/adk"
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/proto"
+
+	runtimea2a "github.com/kagent-dev/kagent/go/adk/pkg/a2a"
+	runtimeRunner "github.com/kagent-dev/kagent/go/adk/pkg/runner"
+	configv1 "github.com/kagent-dev/kagent/go/api/gen/kagent/config/v1"
 )
 
 func TestMCPCLIRunnerA2ACallerAndSTSIsolationAcrossSharedAgents(t *testing.T) {
@@ -131,18 +133,18 @@ func TestMCPCLIRunnerA2ACallerAndSTSIsolationAcrossSharedAgents(t *testing.T) {
 				_, _ = fmt.Fprint(w, `{"id":"final","choices":[{"index":0,"message":{"role":"assistant","content":"complete"},"finish_reason":"stop"}]}`)
 			}))
 			defer modelHTTP.Close()
-			configFor := func(scope string) *adk.AgentConfig {
-				connection := adk.HttpMcpServerConfig{Params: adk.StreamableHTTPConnectionParams{Url: remote.URL + "/" + scope, Headers: map[string]string{"X-Order": "static"}}, AllowedHeaders: []string{"X-Allowed", "X-Order"}}
-				cli := connection
+			configFor := func(scope string) *configv1.ADKAgentConfig {
+				connection := &configv1.ADKHTTPMCPServerConfig{Params: &configv1.ADKHTTPConnectionParams{Url: remote.URL + "/" + scope, Headers: map[string]string{"X-Order": "static"}}, AllowedHeaders: []string{"X-Allowed", "X-Order"}}
+				cli := proto.CloneOf(connection)
 				cli.Tools = []string{"cli_record"}
 				connection.Tools = []string{"native_record"}
-				return &adk.AgentConfig{Name: scope, Model: &adk.OpenAI{BaseModel: adk.BaseModel{Type: adk.ModelTypeOpenAI, Model: "fixture"}, BaseUrl: modelHTTP.URL}, HttpTools: []adk.HttpMcpServerConfig{connection}, CLITools: []adk.MCPCLIConfig{{Name: "browser", HTTP: cli}}}
+				return &configv1.ADKAgentConfig{Name: scope, Model: &configv1.ADKModelConfig{Model: "fixture", Provider: &configv1.ADKModelConfig_Openai{Openai: &configv1.ADKOpenAI{BaseUrl: modelHTTP.URL}}}, HttpTools: []*configv1.ADKHTTPMCPServerConfig{connection}, CliTools: []*configv1.ADKMCPCLIConfig{{Name: "browser", Http: cli}}}
 			}
 			root := configFor("root")
-			root.SubAgents = []*adk.AgentConfig{configFor("child")}
+			root.SubAgents = []*configv1.ADKAgentConfig{configFor("child")}
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
-			runnerConfig, err := runtimeRunner.CreateRunnerConfig(ctx, root, nil, "authentication", nil, nil)
+			runnerConfig, err := runtimeRunner.CreateRunnerConfig(ctx, &configv1.ADKConfig{Agent: root, Runtime: &configv1.ADKRuntimeConfig{TokenPropagation: &configv1.TokenPropagationConfig{Enabled: true, StsWellKnownUri: optionalCLIString(stsURL)}}}, nil, "authentication", nil, nil)
 			require.NoError(t, err)
 			var wg sync.WaitGroup
 			for _, scope := range []string{"root", "child"} {
@@ -198,4 +200,11 @@ func TestMCPCLIRunnerA2ACallerAndSTSIsolationAcrossSharedAgents(t *testing.T) {
 			}
 		})
 	}
+}
+
+func optionalCLIString(value string) *string {
+	if value == "" {
+		return nil
+	}
+	return &value
 }
