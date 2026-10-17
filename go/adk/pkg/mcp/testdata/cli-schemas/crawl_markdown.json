@@ -1,0 +1,31 @@
+{
+  "required": [
+    "body"
+  ],
+  "properties": {
+    "body": {
+      "type": "object",
+      "properties": {
+        "f": {
+          "default": "fit",
+          "type": "string",
+          "enum": [
+            "raw",
+            "fit"
+          ]
+        },
+        "url": {
+          "description": "Known public HTTP(S) URL; fetcher separately checks actual destinations.",
+          "type": "string",
+          "pattern": "^https?://",
+          "maxLength": 8192
+        }
+      },
+      "required": [
+        "url"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "type": "object"
+}

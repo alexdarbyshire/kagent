@@ -111,7 +111,7 @@ func TestCLIProcessLegacySSE(t *testing.T) {
 		err := cmd.Run()
 		return out.String(), diagnostic.String(), err
 	}
-	out, diagnostic, err := run("record", "--help")
+	out, diagnostic, err := run("record", "--help", "schema")
 	if err != nil || !strings.Contains(out, "9007199254740993") {
 		t.Fatalf("exact SSE schema: err=%v stdout=%s stderr=%s", err, out, diagnostic)
 	}

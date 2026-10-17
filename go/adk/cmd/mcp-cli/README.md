@@ -39,6 +39,7 @@ there are no tool-command endpoint flags.
 ```sh
 ./mcp-cli --binding-file binding.json --help
 ./mcp-cli --binding-file binding.json navigate --help
+./mcp-cli --binding-file binding.json navigate --help schema
 ./mcp-cli --binding-file binding.json navigate --url 'https://example.test'
 ./mcp-cli --binding-file binding.json navigate --url=https://example.test
 ./mcp-cli --binding-file binding.json navigate --input-file arguments.json
@@ -46,15 +47,60 @@ printf '%s\n' '{"url":"https://example.test"}' |
   ./mcp-cli --binding-file binding.json navigate --input-file -
 ```
 
-Arguments use original MCP property names. Strings are literal; numbers,
-integers, booleans, arrays, and objects use schema-typed JSON values. Use JSON
-input for complex or ambiguous schemas, explicit null, and properties named
-`help` or `input-file`. JSON input must be one object and cannot be combined
-with property flags. No arguments supplies an empty object. Duplicate keys or
-flags, unknown flags, and schema violations fail before tool dispatch. JSON
-properties follow the full schema, including its additional-property rules.
+Operation help lists available flags, parse modes, descriptions and requirements.
+`TOOL --help schema` prints the original schema with exact numeric values. Both
+help modes discover tools without invoking an operation.
+
+Arguments preserve MCP property spelling. Immediate children of top-level object
+groups become unqualified flags when unique; collisions use the discovered group
+and a dot, such as `--path.id` and `--body.id`. Remaining literal properties win
+collisions. Fully expanded group wrappers disappear: for Gitea
+`issueCreateComment`, `--owner alice --repo demo --index 12 --body 'Comment text'`
+assembles `path.owner`, `path.repo`, `path.index`, and `body.body`. This intentionally
+retires the old whole-object `--body` spelling for that schema. Use whole-request
+JSON in its original shape for existing callers that supply a complete body.
+
+Unambiguously string-valued parameters take literal text. Other parameters parse
+valid JSON with its original type. If a parameter permits strings, non-JSON text
+is accepted as a string: `--value hello` supplies text and `--value 123` supplies
+a number. Use `--value='"123"'` for a numeric-looking string. Failed schema
+validation never reinterprets a JSON value as text. Syntactically valid JSON with
+duplicate keys remains an error. Malformed structured-looking input is text only
+when strings are permitted; otherwise it is invalid JSON.
+
+Arrays and nested objects remain JSON values; arrays have no indexed flags.
+Local references and
+composition/conditional branches contribute declared names; the original full
+schema validates the assembled request and all conditional combinations.
+Defaults in help are documentation only. Omitted flags remain absent, and a group
+is created only when a child is supplied.
+
+Use `--input-file` for an explicit empty object, dynamic keys, unprojected fields,
+or reserved literal `help`, `input-file`, `base64-file`, and `text-file` properties. Groups that cannot be
+fully projected retain a JSON-valued wrapper. JSON input must be one object and
+cannot be combined with property flags. No arguments supplies an empty object.
+Duplicate keys at any depth, repeated or overlapping parent/child assignments,
+unknown flags, and schema violations fail before tool dispatch. JSON properties
+follow the full schema, including its additional-property rules.
 Reading an input file sends its parsed arguments, not the file itself. Binding
 and argument paths must be regular files; stdin is available for pipe input.
+
+Use repeatable `--base64-file NAME=PATH` or `--text-file NAME=PATH` to supply a
+string from a local file to an exposed parameter name. The `--base64-file=NAME=PATH`
+and `--text-file=NAME=PATH` spellings also work. The path may contain `=`.
+Base64 encoding is standard and padded; text must be UTF-8 and retains newlines.
+Text is never interpreted as JSON, even for mixed-type parameters. These options
+mix with ordinary flags but cannot overwrite another assignment or accompany
+`--input-file`. There are no nested target paths, filename inference or stdin
+file values. Help lists target names without reading files.
+
+File inputs accept regular files, including symlinks to regular files, with
+limits of 8 MiB per file, 16 MiB aggregate raw bytes and 24 MiB assembled JSON.
+Provider schemas may impose lower limits. The command process reads files in
+its own working directory, including under managed execution; values cross the
+private invocation socket, never OS command arguments. A local read, size or
+validation failure dispatches no tool call and does not print file contents.
+An upstream tool can still echo input in its result envelope.
 
 Successful stdout is the MCP `CallToolResult` JSON envelope, preserving content,
 structured content, and metadata. An `isError` result also appears on stdout,

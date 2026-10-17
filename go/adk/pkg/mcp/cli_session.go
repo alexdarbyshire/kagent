@@ -21,8 +21,9 @@ import (
 
 // Integrated commands send only arguments; binding and authority stay in the actor.
 type cliCommandRequest struct {
-	Args  []string `json:"args"`
-	Input []byte   `json:"input,omitempty"`
+	Args  []string       `json:"args"`
+	Input []byte         `json:"input,omitempty"`
+	Files []cliFileValue `json:"files,omitempty"`
 }
 
 type cliCommandResponse struct {
@@ -136,7 +137,7 @@ func (c *cliCommandRuntime) run(ctx, invocation context.Context, name string, re
 	if err == nil {
 		// Reset captured wire state between commands, without changing session identity.
 		session.command.lifecycle.reset()
-		err = runCLICommand(context.WithValue(context.WithValue(ctx, operationKey{}, &clientOperation{}), cliCommandContextKey{}, invocation), binding, request.Args, io.NopCloser(bytes.NewReader(request.Input)), &output, session.command)
+		err = runCLICommand(context.WithValue(context.WithValue(ctx, operationKey{}, &clientOperation{}), cliCommandContextKey{}, invocation), binding, request.Args, request.Files, io.NopCloser(bytes.NewReader(request.Input)), &output, session.command)
 	}
 	response := cliCommandResponse{Output: output.String()}
 	if err != nil {
@@ -159,8 +160,8 @@ func cliCommandSocket() string {
 	return socket
 }
 
-func runActorCLI(ctx context.Context, socket, name string, args []string, stdin io.Reader, stdout io.Writer) error {
-	command := cliCommandRequest{Args: append([]string(nil), args...)}
+func runActorCLI(ctx context.Context, socket, name string, args []string, files []cliFileValue, stdin io.Reader, stdout io.Writer) error {
+	command := cliCommandRequest{Args: append([]string(nil), args...), Files: files}
 	// Files belong to the subprocess working directory, not the actor's cwd.
 	for i := 1; i < len(command.Args); i++ {
 		flag, value, inline := strings.Cut(command.Args[i], "=")

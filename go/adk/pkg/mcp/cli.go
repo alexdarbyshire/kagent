@@ -51,16 +51,19 @@ func RunCLI(ctx context.Context, args []string, stdin io.Reader, stdout io.Write
 	if binding.Name == "" {
 		return errors.New("MCP binding requires a command name")
 	}
-	args = args[2:]
+	args, files, err := prepareCLIFileValues(ctx, args[2:])
+	if err != nil {
+		return err
+	}
 	if socket := cliCommandSocket(); socket != "" {
-		return runActorCLI(ctx, socket, binding.Name, args, stdin, stdout)
+		return runActorCLI(ctx, socket, binding.Name, args, files, stdin, stdout)
 	}
 	remote, err := openCLISession(ctx, binding, nil)
 	if err != nil {
 		return err
 	}
 	defer func() { err = errors.Join(err, remote.Close()) }()
-	return runCLICommand(ctx, binding, args, stdin, stdout, remote)
+	return runCLICommand(ctx, binding, args, files, stdin, stdout, remote)
 }
 
 // cliRemoteSession owns transport resources independently of a command process.
@@ -205,7 +208,7 @@ func openCLISession(ctx context.Context, binding cliBinding, headers *cliCommand
 	return remoteSession, nil
 }
 
-func runCLICommand(ctx context.Context, binding cliBinding, args []string, stdin io.Reader, stdout io.Writer, remote *cliRemoteSession) error {
+func runCLICommand(ctx context.Context, binding cliBinding, args []string, files []cliFileValue, stdin io.Reader, stdout io.Writer, remote *cliRemoteSession) error {
 	ctx, cancel := context.WithTimeout(ctx, remote.timeout)
 	defer cancel()
 	var err error
@@ -243,10 +246,6 @@ func runCLICommand(ctx context.Context, binding cliBinding, args []string, stdin
 	if err != nil {
 		return fmt.Errorf("failed to preserve tool schema: %w", err)
 	}
-	var schema cliArgumentSchema
-	if err := json.Unmarshal(schemaData, &schema); err != nil {
-		return fmt.Errorf("unsupported tool schema: %w", err)
-	}
 	schemaValue, err := decodeJSON(schemaData)
 	if err != nil {
 		return fmt.Errorf("unsupported tool schema: %w", err)
@@ -260,17 +259,36 @@ func runCLICommand(ctx context.Context, binding cliBinding, args []string, stdin
 	if err != nil {
 		return fmt.Errorf("unsupported tool schema: %w", err)
 	}
-	if len(args) == 2 && args[1] == "--help" {
-		var help strings.Builder
-		fmt.Fprintf(&help, "%s %s: %s\nArguments use original names: --property value or --property=value.\nUse --input-file PATH or --input-file - for a JSON object, complex schemas, null, or reserved help/input-file properties. Do not combine input modes.\nRequired: %s\nSchema: %s\n", binding.Name, selected.Name, selected.Description, strings.Join(schema.Required, ", "), schemaData)
-		_, err = io.WriteString(stdout, help.String())
+	parameters := cliParameters(resolved)
+	if len(args) == 3 && args[1] == "--help" && args[2] == "schema" {
+		_, err = fmt.Fprintf(stdout, "%s\n", schemaData)
 		return err
 	}
-	arguments, err := cliArguments(ctx, args[1:], stdin, &schema)
+	if len(args) == 2 && args[1] == "--help" {
+		help, err := cliParameterHelp(binding.Name, selected.Name, selected.Description, resolved, parameters)
+		if err != nil {
+			return err
+		}
+		_, err = io.WriteString(stdout, help)
+		return err
+	}
+	arguments, err := cliArguments(ctx, args[1:], files, stdin, parameters)
 	if err != nil {
 		return fmt.Errorf("invalid arguments for %s %s: %w", binding.Name, selected.Name, err)
 	}
+	if len(files) > 0 {
+		data, err := json.Marshal(arguments)
+		if err != nil {
+			return fmt.Errorf("failed to encode file-backed arguments: %w", err)
+		}
+		if len(data) > cliRequestLimit {
+			return errors.New("assembled file-backed request exceeds 24 MiB")
+		}
+	}
 	if err := resolved.Validate(arguments); err != nil {
+		if len(files) > 0 {
+			return fmt.Errorf("invalid arguments for %s %s: %w", binding.Name, selected.Name, cliFileValidationError(err))
+		}
 		return fmt.Errorf("invalid arguments for %s %s: %w", binding.Name, selected.Name, err)
 	}
 	result, err := session.CallTool(ctx, &mcpsdk.CallToolParams{Name: selected.Name, Arguments: arguments})
@@ -318,32 +336,20 @@ func cliConnection(binding cliBinding) (mcpServerParams, []string, bool) {
 	return mcpServerParams{URL: p.Url, ServerType: "http", Headers: p.Headers, Timeout: cliDuration(p.Timeout), SseReadTimeout: cliDuration(p.SseReadTimeout), TLSInsecureSkipVerify: p.TLSInsecureSkipVerify, TLSCACertPath: p.TLSCACertPath, TLSDisableSystemCAs: p.TLSDisableSystemCAs}, binding.HTTP.Tools, binding.HTTP.RequireApproval
 }
 
-// This projection chooses ordinary flag types; the full raw schema validates
-// input. Numeric constraints never pass through a float64 schema representation.
-type cliArgumentSchema struct {
-	Properties map[string]json.RawMessage `json:"properties"`
-	Required   []string                   `json:"required"`
-}
-type cliPropertySchema struct {
-	Type json.RawMessage `json:"type"`
-}
-
-func cliArguments(ctx context.Context, args []string, stdin io.Reader, schema *cliArgumentSchema) (map[string]any, error) {
+func cliArguments(ctx context.Context, args []string, files []cliFileValue, stdin io.Reader, parameters map[string]cliParameter) (map[string]any, error) {
 	result := map[string]any{}
-	for i := 0; i < len(args); i++ {
-		if !strings.HasPrefix(args[i], "--") {
-			return nil, fmt.Errorf("expected argument flag, got %q", args[i])
-		}
-		name, value, hasValue := strings.Cut(strings.TrimPrefix(args[i], "--"), "=")
-		if !hasValue {
-			i++
-			if i >= len(args) {
-				return nil, fmt.Errorf("missing value for --%s", name)
-			}
-			value = args[i]
-		}
+	var assigned [][]string
+	options, err := cliOptions(args)
+	if err != nil {
+		return nil, err
+	}
+	for _, file := range files {
+		options = append(options, cliOption{name: file.Name, value: file.Value, file: true})
+	}
+	for _, option := range options {
+		name, value := option.name, option.value
 		if name == "input-file" {
-			if len(result) > 0 || i != len(args)-1 {
+			if len(options) != 1 || option.file {
 				return nil, errors.New("--input-file cannot be combined with argument flags")
 			}
 			var data []byte
@@ -373,30 +379,45 @@ func cliArguments(ctx context.Context, args []string, stdin io.Reader, schema *c
 		if name == "help" {
 			return nil, errors.New("--help must be used alone; use JSON input for the help property")
 		}
-		property, ok := schema.Properties[name]
+		parameter, ok := parameters[name]
 		if !ok {
 			return nil, fmt.Errorf("unknown argument --%s", name)
 		}
-		if _, ok := result[name]; ok {
+		for _, path := range assigned {
+			common := min(len(path), len(parameter.path))
+			if slices.Equal(path[:common], parameter.path[:common]) {
+				return nil, fmt.Errorf("duplicate or overlapping argument --%s", name)
+			}
+		}
+		assigned = append(assigned, parameter.path)
+		target := result
+		for _, parent := range parameter.path[:len(parameter.path)-1] {
+			if target[parent] == nil {
+				target[parent] = map[string]any{}
+			}
+			var ok bool
+			target, ok = target[parent].(map[string]any)
+			if !ok {
+				return nil, fmt.Errorf("overlapping argument --%s", name)
+			}
+		}
+		key := parameter.path[len(parameter.path)-1]
+		if _, ok := target[key]; ok {
 			return nil, fmt.Errorf("duplicate argument --%s", name)
 		}
-		var propertySchema cliPropertySchema
-		if err := json.Unmarshal(property, &propertySchema); err != nil {
-			return nil, fmt.Errorf("ambiguous schema for --%s; use --input-file", name)
-		}
-		var propertyType string
-		if len(propertySchema.Type) == 0 || json.Unmarshal(propertySchema.Type, &propertyType) != nil {
-			return nil, fmt.Errorf("ambiguous schema for --%s; use --input-file", name)
-		}
-		if propertyType == "string" {
-			result[name] = value
+		if option.file || parameter.mode == cliLiteralText {
+			target[key] = value
 			continue
 		}
 		parsed, err := decodeJSON([]byte(value))
 		if err != nil {
+			if parameter.mode == cliJSONOrText && !json.Valid([]byte(value)) {
+				target[key] = value
+				continue
+			}
 			return nil, fmt.Errorf("invalid --%s JSON value: %w", name, err)
 		}
-		result[name] = parsed
+		target[key] = parsed
 	}
 	return result, nil
 }

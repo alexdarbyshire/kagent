@@ -1,0 +1,195 @@
+{
+  "required": [
+    "body"
+  ],
+  "properties": {
+    "body": {
+      "$ref": "#/$defs/EditRequest"
+    }
+  },
+  "type": "object",
+  "$defs": {
+    "EditRequest": {
+      "type": "object",
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/Source"
+        },
+        "edits": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/ImageEdit"
+              },
+              {
+                "$ref": "#/$defs/TextEdit"
+              }
+            ]
+          },
+          "minItems": 1,
+          "maxItems": 20
+        }
+      },
+      "required": [
+        "source",
+        "edits"
+      ],
+      "additionalProperties": false
+    },
+    "ImageEdit": {
+      "description": "Image is centered inside rect with its aspect ratio preserved. Later edits paint over earlier edits.",
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "image"
+          ]
+        },
+        "page": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "rect": {
+          "$ref": "#/$defs/Rect"
+        },
+        "image_base64": {
+          "description": "Canonical base64 bytes. Use managed CLI input/output files; never copy file bytes into model context. PNG/JPEG only, at most 1 MiB decoded, 4096 pixels per side and 4 million pixels. Fully decoded and validated before editing.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1398104
+        }
+      },
+      "required": [
+        "type",
+        "page",
+        "rect",
+        "image_base64"
+      ],
+      "additionalProperties": false
+    },
+    "Source": {
+      "type": "object",
+      "properties": {
+        "base64_string": {
+          "description": "Canonical base64 bytes. Use managed CLI input/output files; never copy file bytes into model context.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4194304
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "base64_string"
+      ],
+      "additionalProperties": false
+    },
+    "TextEdit": {
+      "description": "Single-line text uses the chosen font at its exact whole-point size, never shrunk or clipped to fit. Line-box width is text advance plus two side margins of font_size/4 + 1 points; height is the font bounding-box height plus 2 points. These margins preserve overhanging glyphs and raster hinting. The line box is top aligned and left/center/right aligned within rect. Overflow is rejected.",
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "text"
+          ]
+        },
+        "page": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "rect": {
+          "$ref": "#/$defs/Rect"
+        },
+        "text": {
+          "description": "Literal printable ASCII, single line. Percent sequences and backslash-n stay literal. The caller supplies any date text.",
+          "type": "string",
+          "pattern": "^[ -~]+$",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "font": {
+          "default": "Helvetica",
+          "type": "string",
+          "enum": [
+            "Helvetica",
+            "Times-Roman",
+            "Courier"
+          ]
+        },
+        "font_size": {
+          "default": 12,
+          "type": "integer",
+          "minimum": 6,
+          "maximum": 72
+        },
+        "color": {
+          "default": "#000000",
+          "type": "string",
+          "pattern": "^#[0-9A-Fa-f]{6}$"
+        },
+        "alignment": {
+          "default": "left",
+          "type": "string",
+          "enum": [
+            "left",
+            "center",
+            "right"
+          ]
+        }
+      },
+      "required": [
+        "type",
+        "page",
+        "rect",
+        "text"
+      ],
+      "additionalProperties": false
+    },
+    "Rect": {
+      "description": "Input rectangle in displayed-page points from the top-left; must fit completely within the page.",
+      "type": "object",
+      "properties": {
+        "x": {
+          "type": "number",
+          "minimum": 0.0
+        },
+        "y": {
+          "type": "number",
+          "minimum": 0.0
+        },
+        "width": {
+          "type": "number",
+          "minimum": 0.0,
+          "not": {
+            "enum": [
+              0
+            ]
+          }
+        },
+        "height": {
+          "type": "number",
+          "minimum": 0.0,
+          "not": {
+            "enum": [
+              0
+            ]
+          }
+        }
+      },
+      "required": [
+        "x",
+        "y",
+        "width",
+        "height"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

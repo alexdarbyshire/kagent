@@ -262,7 +262,7 @@ func TestCLIProcessTypedArguments(t *testing.T) {
 			t.Fatalf("%s %s %v", out, stderr, err)
 		}
 		out, stderr, err = run("", "record", "--help")
-		for _, expected := range []string{"--property", "--input-file", "Required: text", `"nullable"`} {
+		for _, expected := range []string{"--property", "--input-file", "--text <literal text> (string; required)", "--nullable <JSON or literal text>", "--help schema"} {
 			if !strings.Contains(out, expected) {
 				t.Fatalf("help missing %s: %s %s %v", expected, out, stderr, err)
 			}
@@ -518,7 +518,7 @@ func TestCLIProcessTypedArguments(t *testing.T) {
 		if err == nil || out != "" || stderr == "" || count.Load() != before {
 			t.Fatalf("invalid fractional input dispatched: %s %s %v", out, stderr, err)
 		}
-		out, stderr, err = run("", "fractional", "--help")
+		out, stderr, err = run("", "fractional", "--help", "schema")
 		if err != nil || !strings.Contains(out, `"minimum":1.0000000000000001`) {
 			t.Fatalf("help rounded schema: %s %s %v", out, stderr, err)
 		}

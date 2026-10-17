@@ -97,14 +97,35 @@ other bindings or platform commands in the same agent.
 ```sh
 inventory --help
 inventory list_items --help
+inventory list_items --help schema
 # Assuming help declares string category, integer limit, and boolean available:
 inventory list_items --category office --limit 20 --available true
 ```
 
-Property names match the MCP schema exactly. String flags take literal strings;
-numbers, booleans, arrays, and objects take schema-typed JSON values. For nested
-values, explicit null, ambiguous schemas, or properties named `help` or
-`input-file`, supply one JSON object instead:
+Operation help lists actual flags and their parse modes; `--help schema` prints
+the full original schema. Neither invokes the operation. Property spelling
+matches the MCP schema. Unique immediate children of top-level object groups
+use unqualified flags; collisions use the actual group name, such as `--path.id`
+and `--body.id`. Remaining literal properties retain their names.
+
+Fully expanded wrappers are removed. For Gitea `issueCreateComment`, `--owner`,
+`--repo`, `--index`, and literal `--body` assemble the original nested request.
+The old whole-object `--body` syntax is intentionally retired for that schema;
+existing JSON callers use `--input-file` with the original shape.
+
+Unambiguous string flags take literal text. Other parameters parse valid JSON
+with its type preserved. When strings are permitted, non-JSON text is accepted
+as a string: `--value hello` is text, `--value 123` is a number, and
+`--value='"123"'` is a numeric-looking string. Invalid combinations fail full
+validation without reinterpreting or retrying the value. Duplicate JSON keys
+remain errors. Arrays and nested objects remain single JSON values.
+Branch-only fields are exposed, while
+the provider's complete schema validates conditional requirements and permitted
+combinations. Defaults are documented without being inserted; omitted groups
+stay absent until a child is supplied.
+
+For explicit empty objects, dynamic keys, unprojected fields, or reserved literal
+properties named `help`, `input-file`, `base64-file` or `text-file`, supply one JSON object instead:
 
 ```sh
 cat > arguments.json <<'JSON'
@@ -117,6 +138,45 @@ cat arguments.json | inventory list_items --input-file -
 These are alternative invocations, not a sequence to run repeatedly. Do not mix
 JSON input and property flags. Reading the file sends parsed argument values,
 not an upload of the file. Invalid input fails before tool dispatch.
+
+## Supply local file values
+
+Target the parameter names shown by operation help. For a document conversion
+binding exposing `submit_file_conversion`, one file supplies `base64_string`:
+
+```sh
+document-conversion submit_file_conversion \
+  --filename dummy.pdf \
+  --base64-file base64_string=./dummy.pdf \
+  --page_start 1 --page_end 3
+```
+
+`filename` is explicit provider metadata. The local path does not determine it.
+Conversion submission returns a task identifier; this command does not wait for
+completion or retrieve the result.
+
+The same option repeats for two files. This synthetic contract illustrates a
+PDF plus a DUMMY signature image; `stamp_pdf` is not an existing estate API:
+
+```sh
+pdf-fixture stamp_pdf \
+  --base64-file pdf_base64=./dummy.pdf \
+  --base64-file image_base64=./dummy-signature.png \
+  --edits '[{"type":"image","page":1,"rect":{"x":72,"y":640,"width":150,"height":50}}]'
+```
+
+For literal UTF-8 text, use `--text-file NAME=PATH`; trailing newlines and
+numeric-looking text remain strings. Both file options accept `--OPTION=NAME=PATH`
+and paths containing `=`. They mix with ordinary flags, reject duplicate or
+overlapping assignments, and remain exclusive of whole-request `--input-file`.
+There is no nested pointer syntax or automatic encoding based on field names.
+
+All files are read by the command in its working directory before dispatch.
+Only regular files are accepted, including symlinks to regular files. Limits are
+8 MiB per file, 16 MiB total raw bytes and 24 MiB assembled JSON; provider schema
+constraints may be smaller. A failing second file prevents the entire call.
+Local diagnostics omit file contents, while upstream results retain their normal
+envelope and may echo input. Help does not read local file values.
 
 ## Save the envelope and process locally
 

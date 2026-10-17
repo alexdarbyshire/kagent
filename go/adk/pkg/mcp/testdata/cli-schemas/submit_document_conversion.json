@@ -1,0 +1,49 @@
+{
+  "required": [
+    "body"
+  ],
+  "properties": {
+    "body": {
+      "type": "object",
+      "properties": {
+        "source_url": {
+          "description": "Public or estate HTTP(S) document URL; never a local file path.",
+          "type": "string",
+          "format": "uri"
+        },
+        "pipeline": {
+          "description": "standard uses OCR/layout; vlm sends page images to the fixed local-qwen preset.",
+          "default": "standard",
+          "type": "string",
+          "enum": [
+            "standard",
+            "vlm"
+          ]
+        },
+        "page_start": {
+          "default": 1,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "page_end": {
+          "description": "Inclusive page range. Read small windows; reconvert another range for long files.",
+          "default": 5,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "force_ocr": {
+          "description": "Standard pipeline only: replace embedded text with OCR.",
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "source_url"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "type": "object"
+}
