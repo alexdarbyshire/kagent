@@ -363,9 +363,9 @@ message ADKPluginBundle {
 message ADKPluginSource {
   oneof source {
     option (buf.validate.oneof).required = true;
-    string oci = 1;
     ADKPluginGitSource git = 2;
     ADKPluginS3Source s3 = 3;
+    string directory = 5;
   }
   string path = 4;
 }
