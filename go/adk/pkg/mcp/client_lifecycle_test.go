@@ -139,7 +139,7 @@ func TestManagedShutdownBoundsManyHungRelationships(t *testing.T) {
 	owner := NewClientLifecycle(t.Context(), nil)
 	configs := make([]*configv1.ADKHTTPMCPServerConfig, 6)
 	for index := range configs {
-		configs[index].Params.Url = remote.URL
+		configs[index] = &configv1.ADKHTTPMCPServerConfig{Params: &configv1.ADKHTTPConnectionParams{Url: remote.URL}}
 	}
 	toolsets := CreateToolsets(t.Context(), configs, nil, nil, false, nil, owner)
 	require.Len(t, toolsets, len(configs))
@@ -236,6 +236,8 @@ type lifecycleToolContext struct {
 	adkagent.Context
 	underlying context.Context
 }
+
+func (lifecycleToolContext) FunctionCallID() string { return "lifecycle-call" }
 
 func (c lifecycleToolContext) Deadline() (time.Time, bool)                        { return c.underlying.Deadline() }
 func (c lifecycleToolContext) Done() <-chan struct{}                              { return c.underlying.Done() }

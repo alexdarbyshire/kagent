@@ -2553,9 +2553,9 @@ type ADKPluginSource struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Types that are valid to be assigned to Source:
 	//
-	//	*ADKPluginSource_Oci
 	//	*ADKPluginSource_Git
 	//	*ADKPluginSource_S3
+	//	*ADKPluginSource_Directory
 	Source        isADKPluginSource_Source `protobuf_oneof:"source"`
 	Path          string                   `protobuf:"bytes,4,opt,name=path,proto3" json:"path,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -2599,15 +2599,6 @@ func (x *ADKPluginSource) GetSource() isADKPluginSource_Source {
 	return nil
 }
 
-func (x *ADKPluginSource) GetOci() string {
-	if x != nil {
-		if x, ok := x.Source.(*ADKPluginSource_Oci); ok {
-			return x.Oci
-		}
-	}
-	return ""
-}
-
 func (x *ADKPluginSource) GetGit() *ADKPluginGitSource {
 	if x != nil {
 		if x, ok := x.Source.(*ADKPluginSource_Git); ok {
@@ -2626,6 +2617,15 @@ func (x *ADKPluginSource) GetS3() *ADKPluginS3Source {
 	return nil
 }
 
+func (x *ADKPluginSource) GetDirectory() string {
+	if x != nil {
+		if x, ok := x.Source.(*ADKPluginSource_Directory); ok {
+			return x.Directory
+		}
+	}
+	return ""
+}
+
 func (x *ADKPluginSource) GetPath() string {
 	if x != nil {
 		return x.Path
@@ -2637,10 +2637,6 @@ type isADKPluginSource_Source interface {
 	isADKPluginSource_Source()
 }
 
-type ADKPluginSource_Oci struct {
-	Oci string `protobuf:"bytes,1,opt,name=oci,proto3,oneof"`
-}
-
 type ADKPluginSource_Git struct {
 	Git *ADKPluginGitSource `protobuf:"bytes,2,opt,name=git,proto3,oneof"`
 }
@@ -2649,11 +2645,15 @@ type ADKPluginSource_S3 struct {
 	S3 *ADKPluginS3Source `protobuf:"bytes,3,opt,name=s3,proto3,oneof"`
 }
 
-func (*ADKPluginSource_Oci) isADKPluginSource_Source() {}
+type ADKPluginSource_Directory struct {
+	Directory string `protobuf:"bytes,5,opt,name=directory,proto3,oneof"`
+}
 
 func (*ADKPluginSource_Git) isADKPluginSource_Source() {}
 
 func (*ADKPluginSource_S3) isADKPluginSource_Source() {}
+
+func (*ADKPluginSource_Directory) isADKPluginSource_Source() {}
 
 type ADKPluginGitSource struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -3282,11 +3282,11 @@ const file_kagent_config_v1_adk_proto_rawDesc = "" +
 	"\x06source\x18\x02 \x01(\v2!.kagent.config.v1.ADKPluginSourceR\x06source\"d\n" +
 	"\x0fADKPluginBundle\x129\n" +
 	"\x06source\x18\x01 \x01(\v2!.kagent.config.v1.ADKPluginSourceR\x06source\x12\x16\n" +
-	"\x06skills\x18\x02 \x03(\tR\x06skills\"\xbb\x01\n" +
-	"\x0fADKPluginSource\x12\x12\n" +
-	"\x03oci\x18\x01 \x01(\tH\x00R\x03oci\x128\n" +
+	"\x06skills\x18\x02 \x03(\tR\x06skills\"\xc7\x01\n" +
+	"\x0fADKPluginSource\x128\n" +
 	"\x03git\x18\x02 \x01(\v2$.kagent.config.v1.ADKPluginGitSourceH\x00R\x03git\x125\n" +
-	"\x02s3\x18\x03 \x01(\v2#.kagent.config.v1.ADKPluginS3SourceH\x00R\x02s3\x12\x12\n" +
+	"\x02s3\x18\x03 \x01(\v2#.kagent.config.v1.ADKPluginS3SourceH\x00R\x02s3\x12\x1e\n" +
+	"\tdirectory\x18\x05 \x01(\tH\x00R\tdirectory\x12\x12\n" +
 	"\x04path\x18\x04 \x01(\tR\x04pathB\x0f\n" +
 	"\x06source\x12\x05\xbaH\x02\b\x01\">\n" +
 	"\x12ADKPluginGitSource\x12\x10\n" +
@@ -3488,9 +3488,9 @@ func file_kagent_config_v1_adk_proto_init() {
 	file_kagent_config_v1_adk_proto_msgTypes[23].OneofWrappers = []any{}
 	file_kagent_config_v1_adk_proto_msgTypes[27].OneofWrappers = []any{}
 	file_kagent_config_v1_adk_proto_msgTypes[32].OneofWrappers = []any{
-		(*ADKPluginSource_Oci)(nil),
 		(*ADKPluginSource_Git)(nil),
 		(*ADKPluginSource_S3)(nil),
+		(*ADKPluginSource_Directory)(nil),
 	}
 	file_kagent_config_v1_adk_proto_msgTypes[35].OneofWrappers = []any{}
 	type x struct{}
