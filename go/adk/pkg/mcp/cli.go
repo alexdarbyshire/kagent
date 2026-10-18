@@ -33,7 +33,7 @@ type cliBinding = adk.MCPCLIConfig
 // The executable owns signal handling and stderr diagnostics.
 func RunCLI(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer) (err error) {
 	if len(args) < 2 || args[0] != "--binding-file" {
-		return errors.New("usage: mcp-cli --binding-file PATH [tool [--property value | --input-file PATH|-] | --help]")
+		return cliUsageErrorf("usage: mcp-cli --binding-file PATH [tool [--property value | --input-file PATH|-] | --help]")
 	}
 	data, err := readCLIFile(ctx, args[1])
 	if err != nil {
@@ -51,19 +51,50 @@ func RunCLI(ctx context.Context, args []string, stdin io.Reader, stdout io.Write
 	if binding.Name == "" {
 		return errors.New("MCP binding requires a command name")
 	}
-	args, files, err := prepareCLIFileValues(ctx, args[2:])
+	command, err := parseCLICommand(args[2:])
 	if err != nil {
 		return err
 	}
-	if socket := cliCommandSocket(); socket != "" {
-		return runActorCLI(ctx, socket, binding.Name, args, files, stdin, stdout)
+	socket := cliCommandSocket()
+	if socket == "" {
+		if err := binding.ValidateTransport(); err != nil {
+			return err
+		}
+		params, _, _ := cliConnection(binding)
+		timeout, err := cliTimeout(params)
+		if err != nil {
+			return err
+		}
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+	request, err := command.prepare(ctx, stdin)
+	if err != nil {
+		return err
+	}
+	outputPath := command.outputPath
+	if outputPath != "" {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		file, err := os.OpenFile(outputPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+		if err != nil {
+			return fmt.Errorf("failed to create MCP output file (tool not called): %w", err)
+		}
+		output := &cliOutputFile{file: file}
+		stdout = output
+		defer func() { err = errors.Join(err, output.finish(ctx)) }()
+	}
+	if socket != "" {
+		return runActorCLI(ctx, socket, binding.Name, request, stdout)
 	}
 	remote, err := openCLISession(ctx, binding, nil)
 	if err != nil {
 		return err
 	}
 	defer func() { err = errors.Join(err, remote.Close()) }()
-	return runCLICommand(ctx, binding, args, files, stdin, stdout, remote)
+	return renderCLIOutcome(stdout, runCLICommand(ctx, binding, request, remote))
 }
 
 // cliRemoteSession owns transport resources independently of a command process.
@@ -122,20 +153,9 @@ func openCLISession(ctx context.Context, binding cliBinding, headers *cliCommand
 	if params.TLSDisableSystemCAs != nil && *params.TLSDisableSystemCAs && (params.TLSCACertPath == nil || *params.TLSCACertPath == "") {
 		return nil, errors.New("tls_disable_system_cas requires tls_ca_cert_path")
 	}
-	if params.SseReadTimeout != nil && (params.SseReadTimeout.CheckValid() != nil || params.SseReadTimeout.AsDuration() <= 0) {
-		return nil, errors.New("MCP SSE read timeout must be positive and finite")
-	}
-	timeout := defaultTimeout
-	if params.Timeout != nil {
-		if params.Timeout.CheckValid() != nil || params.Timeout.AsDuration() <= 0 {
-			return nil, errors.New("MCP timeout must be positive")
-		}
-		timeout = params.Timeout.AsDuration()
-	}
-	if params.ServerType == "sse" && params.SseReadTimeout != nil {
-		// Native SSE keeps its GET alive for the larger configured timeout.
-		// The command budget must not cut that stream off earlier.
-		timeout = max(timeout, params.SseReadTimeout.AsDuration())
+	timeout, err := cliTimeout(params)
+	if err != nil {
+		return nil, err
 	}
 	var cancel context.CancelFunc
 	if headers == nil {
@@ -208,103 +228,63 @@ func openCLISession(ctx context.Context, binding cliBinding, headers *cliCommand
 	return remoteSession, nil
 }
 
-func runCLICommand(ctx context.Context, binding cliBinding, args []string, files []cliFileValue, stdin io.Reader, stdout io.Writer, remote *cliRemoteSession) error {
+func runCLICommand(ctx context.Context, binding cliBinding, request cliCommandRequest, remote *cliRemoteSession) cliOutcome {
 	ctx, cancel := context.WithTimeout(ctx, remote.timeout)
 	defer cancel()
-	var err error
 	session, lifecycle := remote.session, remote.lifecycle
 	_, selectedTools, _ := cliConnection(binding)
 	var tools []*mcpsdk.Tool
 	for tool, err := range session.Tools(ctx, nil) {
 		if err != nil {
-			return fmt.Errorf("failed to discover MCP tools: %w", lifecycle.connectionError(err))
+			return cliFailure{Err: fmt.Errorf("failed to discover MCP tools: %w", lifecycle.connectionError(err))}
 		}
 		if len(selectedTools) == 0 || slices.Contains(selectedTools, tool.Name) {
 			tools = append(tools, tool)
 		}
 	}
-	if len(args) == 0 || (len(args) == 1 && args[0] == "--help") {
-		var help strings.Builder
-		fmt.Fprintf(&help, "%s: MCP tools\nUsage: %s TOOL --property value | --input-file PATH|-\n", binding.Name, binding.Name)
+	if request.Kind == cliCatalogKind {
+		help := cliCatalogHelp{Command: binding.Name}
 		for _, tool := range tools {
-			fmt.Fprintf(&help, "  %s\t%s\n", tool.Name, tool.Description)
+			help.Tools = append(help.Tools, cliToolDescription{Name: tool.Name, Description: tool.Description})
 		}
-		_, err = io.WriteString(stdout, help.String())
-		return err
+		return help
 	}
 	var selected *mcpsdk.Tool
 	for _, tool := range tools {
-		if tool.Name == args[0] {
+		if tool.Name == request.Tool {
 			selected = tool
 			break
 		}
 	}
 	if selected == nil {
-		return fmt.Errorf("MCP command %s: unknown or excluded tool %q", binding.Name, args[0])
+		return cliFailure{Err: cliUsageErrorf("MCP command %s: unknown or excluded tool %q", binding.Name, request.Tool)}
 	}
 	schemaData, err := lifecycle.schemaJSON(selected.Name)
 	if err != nil {
-		return fmt.Errorf("failed to preserve tool schema: %w", err)
+		return cliFailure{Err: fmt.Errorf("failed to preserve tool schema: %w", err)}
 	}
-	schemaValue, err := decodeJSON(schemaData)
+	plan, err := compileCLIPlan(binding.Name, selected.Name, selected.Description, schemaData)
 	if err != nil {
-		return fmt.Errorf("unsupported tool schema: %w", err)
+		return cliFailure{Err: err}
 	}
-	compiler := schemaValidator.NewCompiler()
-	compiler.UseLoader(cliSchemaLoader{})
-	if err := compiler.AddResource("urn:kagent:mcp-tool", schemaValue); err != nil {
-		return fmt.Errorf("unsupported tool schema: %w", err)
-	}
-	resolved, err := compiler.Compile("urn:kagent:mcp-tool")
+	help, arguments, err := plan.prepare(request)
 	if err != nil {
-		return fmt.Errorf("unsupported tool schema: %w", err)
+		return cliFailure{Err: err}
 	}
-	parameters := cliParameters(resolved)
-	if len(args) == 3 && args[1] == "--help" && args[2] == "schema" {
-		_, err = fmt.Fprintf(stdout, "%s\n", schemaData)
-		return err
+	if help != nil {
+		return help
 	}
-	if len(args) == 2 && args[1] == "--help" {
-		help, err := cliParameterHelp(binding.Name, selected.Name, selected.Description, resolved, parameters)
-		if err != nil {
-			return err
-		}
-		_, err = io.WriteString(stdout, help)
-		return err
-	}
-	arguments, err := cliArguments(ctx, args[1:], files, stdin, parameters)
+	result, err := session.CallTool(ctx, &mcpsdk.CallToolParams{Name: plan.tool, Arguments: arguments})
 	if err != nil {
-		return fmt.Errorf("invalid arguments for %s %s: %w", binding.Name, selected.Name, err)
-	}
-	if len(files) > 0 {
-		data, err := json.Marshal(arguments)
-		if err != nil {
-			return fmt.Errorf("failed to encode file-backed arguments: %w", err)
-		}
-		if len(data) > cliRequestLimit {
-			return errors.New("assembled file-backed request exceeds 24 MiB")
-		}
-	}
-	if err := resolved.Validate(arguments); err != nil {
-		if len(files) > 0 {
-			return fmt.Errorf("invalid arguments for %s %s: %w", binding.Name, selected.Name, cliFileValidationError(err))
-		}
-		return fmt.Errorf("invalid arguments for %s %s: %w", binding.Name, selected.Name, err)
-	}
-	result, err := session.CallTool(ctx, &mcpsdk.CallToolParams{Name: selected.Name, Arguments: arguments})
-	if err != nil {
-		return fmt.Errorf("failed to call MCP %s %s (not retried): %w", binding.Name, selected.Name, lifecycle.connectionError(err))
+		return cliFailure{Err: fmt.Errorf("failed to call MCP %s %s (not retried): %w", binding.Name, selected.Name, lifecycle.connectionError(err))}
 	}
 	resultData, err := lifecycle.resultJSON()
 	if err != nil {
-		return fmt.Errorf("failed to preserve MCP result: %w", err)
+		return cliFailure{Err: fmt.Errorf("failed to preserve MCP result: %w", err)}
 	}
 	resultData, err = transformResult(ctx, resultData)
 	if err != nil {
-		return fmt.Errorf("adapt MCP result (operation not replayed): %w", err)
-	}
-	if err := json.NewEncoder(stdout).Encode(json.RawMessage(resultData)); err != nil {
-		return fmt.Errorf("failed to write MCP result: %w", err)
+		return cliFailure{Err: fmt.Errorf("adapt MCP result (operation not replayed): %w", err)}
 	}
 	// The SDK keeps resultType private; inspect the original wire envelope to
 	// reject future result semantics rather than silently report success.
@@ -312,19 +292,38 @@ func runCLICommand(ctx context.Context, binding cliBinding, args []string, files
 		ResultType string `json:"resultType"`
 	}
 	if err := json.Unmarshal(resultData, &envelope); err != nil {
-		return fmt.Errorf("failed to inspect MCP result: %w", err)
+		return cliResult{Envelope: resultData, Err: fmt.Errorf("failed to inspect MCP result: %w", err)}
 	}
 	switch envelope.ResultType {
 	case "", "complete":
 	case "input_required":
-		return errors.New("MCP input-required interaction is unsupported")
+		return cliResult{Envelope: resultData, Err: errors.New("MCP input-required interaction is unsupported")}
 	default:
-		return fmt.Errorf("MCP result type %q is unsupported", envelope.ResultType)
+		return cliResult{Envelope: resultData, Err: fmt.Errorf("MCP result type %q is unsupported", envelope.ResultType)}
 	}
 	if result.IsError {
-		return fmt.Errorf("MCP tool %s %s returned isError", binding.Name, selected.Name)
+		return cliResult{Envelope: resultData, Err: fmt.Errorf("MCP tool %s %s returned isError", binding.Name, selected.Name)}
 	}
-	return nil
+	return cliResult{Envelope: resultData}
+}
+
+func cliTimeout(params mcpServerParams) (time.Duration, error) {
+	if params.SseReadTimeout != nil && (params.SseReadTimeout.CheckValid() != nil || params.SseReadTimeout.AsDuration() <= 0) {
+		return 0, errors.New("MCP SSE read timeout must be positive and finite")
+	}
+	timeout := defaultTimeout
+	if params.Timeout != nil {
+		if params.Timeout.CheckValid() != nil || params.Timeout.AsDuration() <= 0 {
+			return 0, errors.New("MCP timeout must be positive")
+		}
+		timeout = params.Timeout.AsDuration()
+	}
+	if params.ServerType == "sse" && params.SseReadTimeout != nil {
+		// Native SSE keeps its GET alive for the larger configured timeout.
+		// The command budget must not cut that stream off earlier.
+		timeout = max(timeout, params.SseReadTimeout.AsDuration())
+	}
+	return timeout, nil
 }
 
 func cliConnection(binding cliBinding) (mcpServerParams, []string, bool) {
@@ -334,92 +333,6 @@ func cliConnection(binding cliBinding) (mcpServerParams, []string, bool) {
 	}
 	p := binding.HTTP.Params
 	return mcpServerParams{URL: p.Url, ServerType: "http", Headers: p.Headers, Timeout: cliDuration(p.Timeout), SseReadTimeout: cliDuration(p.SseReadTimeout), TLSInsecureSkipVerify: p.TLSInsecureSkipVerify, TLSCACertPath: p.TLSCACertPath, TLSDisableSystemCAs: p.TLSDisableSystemCAs}, binding.HTTP.Tools, binding.HTTP.RequireApproval
-}
-
-func cliArguments(ctx context.Context, args []string, files []cliFileValue, stdin io.Reader, parameters map[string]cliParameter) (map[string]any, error) {
-	result := map[string]any{}
-	var assigned [][]string
-	options, err := cliOptions(args)
-	if err != nil {
-		return nil, err
-	}
-	for _, file := range files {
-		options = append(options, cliOption{name: file.Name, value: file.Value, file: true})
-	}
-	for _, option := range options {
-		name, value := option.name, option.value
-		if name == "input-file" {
-			if len(options) != 1 || option.file {
-				return nil, errors.New("--input-file cannot be combined with argument flags")
-			}
-			var data []byte
-			var err error
-			if value == "-" {
-				reader, ok := stdin.(io.ReadCloser)
-				if !ok {
-					return nil, errors.New("MCP CLI stdin must support cancellation by closing")
-				}
-				data, err = readCLIInput(ctx, reader)
-			} else {
-				data, err = readCLIFile(ctx, value)
-			}
-			if err != nil {
-				return nil, fmt.Errorf("failed to read JSON input: %w", err)
-			}
-			object, err := decodeJSON(data)
-			if err != nil {
-				return nil, err
-			}
-			mapped, ok := object.(map[string]any)
-			if !ok {
-				return nil, errors.New("JSON input must be an object")
-			}
-			return mapped, nil
-		}
-		if name == "help" {
-			return nil, errors.New("--help must be used alone; use JSON input for the help property")
-		}
-		parameter, ok := parameters[name]
-		if !ok {
-			return nil, fmt.Errorf("unknown argument --%s", name)
-		}
-		for _, path := range assigned {
-			common := min(len(path), len(parameter.path))
-			if slices.Equal(path[:common], parameter.path[:common]) {
-				return nil, fmt.Errorf("duplicate or overlapping argument --%s", name)
-			}
-		}
-		assigned = append(assigned, parameter.path)
-		target := result
-		for _, parent := range parameter.path[:len(parameter.path)-1] {
-			if target[parent] == nil {
-				target[parent] = map[string]any{}
-			}
-			var ok bool
-			target, ok = target[parent].(map[string]any)
-			if !ok {
-				return nil, fmt.Errorf("overlapping argument --%s", name)
-			}
-		}
-		key := parameter.path[len(parameter.path)-1]
-		if _, ok := target[key]; ok {
-			return nil, fmt.Errorf("duplicate argument --%s", name)
-		}
-		if option.file || parameter.mode == cliLiteralText {
-			target[key] = value
-			continue
-		}
-		parsed, err := decodeJSON([]byte(value))
-		if err != nil {
-			if parameter.mode == cliJSONOrText && !json.Valid([]byte(value)) {
-				target[key] = value
-				continue
-			}
-			return nil, fmt.Errorf("invalid --%s JSON value: %w", name, err)
-		}
-		target[key] = parsed
-	}
-	return result, nil
 }
 
 // Token decoding rejects duplicate keys at every depth and retains JSON numbers.

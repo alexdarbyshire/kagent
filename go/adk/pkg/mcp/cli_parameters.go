@@ -295,9 +295,8 @@ func cliExcludesString(schema *schemaValidator.Schema) bool {
 	return false
 }
 
-func cliParameterHelp(command, tool, description string, schema *schemaValidator.Schema, parameters map[string]cliParameter) (string, error) {
-	var help strings.Builder
-	fmt.Fprintf(&help, "%s %s: %s\nArguments: --property value or --property=value.\n", command, tool, description)
+func cliOperationHelpData(command, tool, description string, schema *schemaValidator.Schema, parameters map[string]cliParameter) (cliOperationHelp, error) {
+	help := cliOperationHelp{Command: command, Tool: tool, Description: description}
 	for _, name := range slices.Sorted(maps.Keys(parameters)) {
 		parameter := parameters[name]
 		mode := "JSON"
@@ -329,25 +328,20 @@ func cliParameterHelp(command, tool, description string, schema *schemaValidator
 			}, &complete)
 		}
 		if annotationErr != nil {
-			return "", fmt.Errorf("failed to describe --%s default: %w", name, annotationErr)
+			return cliOperationHelp{}, fmt.Errorf("failed to describe --%s default: %w", name, annotationErr)
 		}
 		slices.Sort(types)
 		types = slices.Compact(types)
 		if len(types) == 0 {
 			types = []string{"schema-defined"}
 		}
-		fmt.Fprintf(&help, "  --%s <%s> (%s; %s)", name, mode, strings.Join(types, "|"), cliParameterRequirement(schema, parameter.path))
-		if len(descriptions) > 0 {
-			fmt.Fprintf(&help, " %s", strings.Join(slices.Compact(descriptions), "; "))
-		}
-		if len(defaults) > 0 {
-			fmt.Fprintf(&help, " Default (documentation only): %s", strings.Join(slices.Compact(defaults), "; "))
-		}
-		help.WriteByte('\n')
+		help.Parameters = append(help.Parameters, cliParameterDescription{
+			Name: name, Mode: mode, Types: types,
+			Requirement:  cliParameterRequirement(schema, parameter.path),
+			Descriptions: slices.Compact(descriptions), Defaults: slices.Compact(defaults),
+		})
 	}
-	fmt.Fprintf(&help, "For JSON or literal text, valid JSON keeps its type; non-JSON text is a string. Quote numeric-looking strings as JSON (for example, --value='\"123\"'). Duplicate JSON keys are rejected.\nFull-schema validation applies, including conditional requirements and combinations.\nUse %s %s --help schema for the original schema.\nUse --input-file PATH or --input-file - for one JSON object in the original shape, including empty objects, dynamic keys, unprojected fields, and reserved help/input-file/base64-file/text-file properties. Do not combine input modes.\n", command, tool)
-	help.WriteString("Use repeatable --base64-file NAME=PATH (standard padded base64) or --text-file NAME=PATH (literal UTF-8, preserving newlines) to supply strings at exposed parameter names. The --OPTION=NAME=PATH form is also accepted. Files must be regular: 8 MiB each, 16 MiB total raw bytes, 24 MiB assembled JSON; provider constraints may be smaller. File options mix with ordinary flags, never --input-file or duplicate/overlapping assignments. No nested target paths or stdin file values.\n")
-	return help.String(), nil
+	return help, nil
 }
 
 func cliParameterRequirement(schema *schemaValidator.Schema, path []string) string {

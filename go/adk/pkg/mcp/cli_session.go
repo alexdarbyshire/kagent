@@ -11,25 +11,12 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"strings"
 	"sync"
 
 	"go.opentelemetry.io/otel/propagation"
 
 	"github.com/kagent-dev/kagent/go/api/adk"
 )
-
-// Integrated commands send only arguments; binding and authority stay in the actor.
-type cliCommandRequest struct {
-	Args  []string       `json:"args"`
-	Input []byte         `json:"input,omitempty"`
-	Files []cliFileValue `json:"files,omitempty"`
-}
-
-type cliCommandResponse struct {
-	Output string `json:"output"`
-	Error  string `json:"error,omitempty"`
-}
 
 type cliCommandContextKey struct{}
 
@@ -91,6 +78,9 @@ func (c *cliCommandHeaders) release() {
 }
 
 func (c *cliCommandRuntime) run(ctx, invocation context.Context, name string, request cliCommandRequest) cliCommandResponse {
+	if err := request.validate(); err != nil {
+		return cliResponse(cliFailure{Err: err})
+	}
 	ctx, cancel := context.WithCancel(ctx)
 	if transform, ok := c.ctx.Value(resultTransformerKey{}).(ResultTransformer); ok {
 		ctx = WithResultTransformer(ctx, transform)
@@ -99,19 +89,19 @@ func (c *cliCommandRuntime) run(ctx, invocation context.Context, name string, re
 	defer func() { stop(); cancel() }()
 	binding, ok := c.bindings[name]
 	if !ok {
-		return cliCommandResponse{Error: "unknown MCP invocation binding"}
+		return cliResponse(cliFailure{Err: errors.New("unknown MCP invocation binding")})
 	}
 	key, err := c.lifecycle.scopeKey(invocation, name+bindingIdentity(binding), "command", c.resolvers[name])
 	if err != nil {
-		return cliCommandResponse{Error: err.Error()}
+		return cliResponse(cliFailure{Err: err})
 	}
 	session, err := c.lifecycle.relationship(key)
 	if err != nil {
-		return cliCommandResponse{Error: err.Error()}
+		return cliResponse(cliFailure{Err: err})
 	}
 	release, err := c.lifecycle.acquire(ctx, session)
 	if err != nil {
-		return cliCommandResponse{Error: err.Error()}
+		return cliResponse(cliFailure{Err: err})
 	}
 	defer release()
 	if session.headers == nil {
@@ -133,21 +123,23 @@ func (c *cliCommandRuntime) run(ctx, invocation context.Context, name string, re
 			session.command.cancel = func() { cancelRemote(); cancelConnection() }
 		}
 	}
-	var output bytes.Buffer
+	var outcome cliOutcome = cliFailure{Err: err}
 	if err == nil {
 		// Reset captured wire state between commands, without changing session identity.
 		session.command.lifecycle.reset()
-		err = runCLICommand(context.WithValue(context.WithValue(ctx, operationKey{}, &clientOperation{}), cliCommandContextKey{}, invocation), binding, request.Args, request.Files, io.NopCloser(bytes.NewReader(request.Input)), &output, session.command)
+		outcome = runCLICommand(context.WithValue(context.WithValue(ctx, operationKey{}, &clientOperation{}), cliCommandContextKey{}, invocation), binding, request, session.command)
 	}
-	response := cliCommandResponse{Output: output.String()}
-	if err != nil {
-		response.Error = err.Error()
-		if session.command != nil && session.command.managed.stateLost() {
-			_ = session.command.Close()
-			session.command = nil
-			response.Error = "MCP relationship state lost; operation not replayed: " + response.Error
+	if err := cliOutcomeError(outcome); err != nil && session.command != nil && session.command.managed.stateLost() {
+		failure := fmt.Errorf("MCP relationship state lost; operation not replayed: %w", errors.Join(err, session.command.Close()))
+		session.command = nil
+		if result, ok := outcome.(cliResult); ok {
+			result.Err = failure
+			outcome = result
+		} else {
+			outcome = cliFailure{Err: failure}
 		}
 	}
+	response := cliResponse(outcome)
 	return response
 }
 
@@ -160,46 +152,7 @@ func cliCommandSocket() string {
 	return socket
 }
 
-func runActorCLI(ctx context.Context, socket, name string, args []string, files []cliFileValue, stdin io.Reader, stdout io.Writer) error {
-	command := cliCommandRequest{Args: append([]string(nil), args...), Files: files}
-	// Files belong to the subprocess working directory, not the actor's cwd.
-	for i := 1; i < len(command.Args); i++ {
-		flag, value, inline := strings.Cut(command.Args[i], "=")
-		if flag != "--input-file" {
-			if !inline {
-				i++
-			}
-			continue
-		}
-		if !inline {
-			if i+1 >= len(command.Args) {
-				return errors.New("missing value for --input-file")
-			}
-			value = command.Args[i+1]
-		}
-		if i != 1 || (inline && len(command.Args) != 2) || (!inline && len(command.Args) != 3) {
-			return errors.New("--input-file cannot be combined with argument flags")
-		}
-		var err error
-		if value == "-" {
-			reader, ok := stdin.(io.ReadCloser)
-			if !ok {
-				return errors.New("MCP CLI stdin must support cancellation by closing")
-			}
-			command.Input, err = readCLIInput(ctx, reader)
-		} else {
-			command.Input, err = readCLIFile(ctx, value)
-		}
-		if err != nil {
-			return fmt.Errorf("failed to read command input: %w", err)
-		}
-		if inline {
-			command.Args[i] = "--input-file=-"
-		} else {
-			command.Args[i+1] = "-"
-			i++
-		}
-	}
+func runActorCLI(ctx context.Context, socket, name string, command cliCommandRequest, stdout io.Writer) error {
 	data, err := json.Marshal(command)
 	if err != nil {
 		return fmt.Errorf("failed to encode MCP command: %w", err)
@@ -221,15 +174,17 @@ func runActorCLI(ctx context.Context, socket, name string, args []string, files 
 	if response.StatusCode != http.StatusOK {
 		return fmt.Errorf("MCP invocation command failed with status %d", response.StatusCode)
 	}
-	var result cliCommandResponse
-	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
+	data, err = io.ReadAll(response.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read MCP command result: %w", err)
+	}
+	result, err := decodeCLIResponse(data)
+	if err != nil {
 		return fmt.Errorf("failed to decode MCP command result: %w", err)
 	}
-	if _, err := io.WriteString(stdout, result.Output); err != nil {
-		return fmt.Errorf("failed to write MCP command result: %w", err)
+	outcome, err := result.outcome(name, command)
+	if err != nil {
+		return err
 	}
-	if result.Error != "" {
-		return errors.New(result.Error)
-	}
-	return nil
+	return renderCLIOutcome(stdout, outcome)
 }

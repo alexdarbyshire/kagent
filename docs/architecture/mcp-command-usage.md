@@ -125,7 +125,7 @@ combinations. Defaults are documented without being inserted; omitted groups
 stay absent until a child is supplied.
 
 For explicit empty objects, dynamic keys, unprojected fields, or reserved literal
-properties named `help`, `input-file`, `base64-file` or `text-file`, supply one JSON object instead:
+properties named `help`, `input-file`, `base64-file`, `text-file` or `output-file`, supply one JSON object instead:
 
 ```sh
 cat > arguments.json <<'JSON'
@@ -182,17 +182,51 @@ envelope and may echo input. Help does not read local file values.
 
 Successful stdout contains the complete MCP `CallToolResult` JSON envelope,
 including `content`, optional `structuredContent`, and metadata. A tool's
-`isError: true` result also appears on stdout but exits nonzero. Input,
-connection, protocol, and unsupported-interaction errors report diagnostics on
-stderr and exit nonzero; an envelope may not be available.
+`isError: true` result also appears on stdout but exits 1. Help and successful
+execution exit 0. Diagnostics go to stderr in both standalone and managed mode.
+
+Invalid usage exits 2 before tool dispatch: unknown/excluded tools, unknown flags,
+missing values, conflicting modes, duplicate assignments or JSON keys, malformed
+JSON, full-schema rejection, invalid file syntax, UTF-8 or input-size violations.
+Initialization and catalog requests may occur; no `tools/call` occurs.
+
+Operational failures exit 1, including unreadable/non-regular input files,
+existing output destinations, invalid private bindings or discovered schemas,
+discovery, authority, transport, protocol, transformation, cancellation and
+returned close/finalization errors. Empty/dash output path syntax instead exits 2.
+If usage and operational failures are joined, exit 1 takes precedence and both
+diagnostics remain available. Existing nonfatal remote-termination warnings keep
+a successful command at exit 0. Exit 1 never authorizes a retry; the operation
+may already have run, and an envelope may not be available.
+
+Use `--output-file PATH` to save that envelope instead of emitting it on stdout:
+
+```bash
+inventory list_items --input-file arguments.json --output-file result.json
+```
+
+The command creates a new mode-0600 file relative to its working directory before
+calling the tool. Existing paths, including symlinks, are refused without a tool
+call. The option works with JSON input, ordinary flags and parameter-targeted file
+inputs. It cannot be combined with help. Saved JSON preserves the complete result
+and exact numbers, with a 32 MiB file limit including the trailing newline. This
+is a local save limit, not a bound on transport buffering.
+
+A complete error envelope is retained, and the command still exits nonzero.
+Empty content arrays and text resembling help remain result envelopes. The
+trusted managed result adapter runs before output reaches stdout or the file.
+Missing responses and failed writes remove the incomplete file; cleanup failures
+are reported. A local save failure never retries the remote operation. Saving
+raw JSON does not decode a PDF/image, fetch a URL, or establish provider-specific
+success. Selected text and explicit base64 decoding remain separate work.
 
 The Go Bash tool returns an execution error when a shell command exits nonzero,
-so do not rely on it displaying that command's captured stdout. Redirect the
-envelope first, handle failure inside the script, and print the saved envelope
+so do not rely on it displaying that command's captured stdout. Save the
+envelope, handle failure inside the script, and print the saved envelope
 when needed. For example, run this as one Bash invocation:
 
 ```bash
-if inventory list_items --input-file arguments.json > result.json 2> diagnostic.txt; then
+if inventory list_items --input-file arguments.json --output-file result.json 2> diagnostic.txt; then
   # This example assumes the endpoint returns structuredContent.items.
   jq -e '.structuredContent.items | type == "array"' result.json >/dev/null || {
     printf '%s\n' 'Expected structuredContent.items array; inspect result.json.'
@@ -221,6 +255,29 @@ Session working directory while presenting only the useful summary to the
 model. This is a processing pattern, not evidence of token savings.
 
 ## Lifecycle and limits
+
+The adapter produces private typed catalog, operation and schema help, result,
+or failure outcomes. Semantic help construction resolves schema annotations and
+parameter metadata; the renderer only formats that data. Results carry their
+captured envelope and any operational failure together. Managed handoff retains
+those distinctions and rejects unknown, inconsistent or request-mismatched
+outcomes before rendering or saving. Its checks apply to adapter-owned fields;
+provider result fields remain under the existing MCP protocol semantics.
+
+The command subprocess parses option syntax once, reads local input files and
+reserves the output destination. Its typed invocation carries assignments or
+whole-request bytes across the private socket; local paths and reconstructed
+argv do not cross that boundary. It also owns output finalization and combines
+execution diagnostics with local write/cleanup errors.
+
+Each selected tool gets one private, immutable command plan from that command's
+live discovery. The plan owns tool identity, original schema bytes, the compiled
+validator, projected flags and parse modes, semantic help, input assembly and
+full-schema validation. Catalog help does not compile every tool. Plans are
+neither retained between commands nor serialized over the socket, so subsequent
+help and invocation observe changed provider schemas within the same connection.
+The existing executor owns discovery, authority, transport and dispatch; the
+renderer formats outcomes without performing those operations.
 
 Changing binding names, endpoints, selection, descriptions, or presentation
 prepares a new revision for new Sessions. Existing Sessions retain their pinned

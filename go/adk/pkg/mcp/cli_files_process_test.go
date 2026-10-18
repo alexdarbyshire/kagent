@@ -106,6 +106,7 @@ func TestCLIProcessLocalFiles(t *testing.T) {
 				errorContains string
 				help          bool
 				large         bool
+				status        int
 			}{
 				{name: "conversion", args: []string{"convert", "--filename=dummy.pdf", "--base64-file", "base64_string=dummy=pdf", "--text-file=note=note"}, want: `{"body":{"filename":"dummy.pdf","base64_string":"AP8B","note":"123\n"}}`},
 				{name: "two binary files and edits", args: []string{"stamp", "--base64-file=pdf_base64=dummy=pdf", "--base64-file", "image_base64=signature", `--edits=[{"type":"image","page":1}]`}, want: `{"body":{"pdf_base64":"AP8B","image_base64":"RFVNTVk=","edits":[{"type":"image","page":1}]}}`},
@@ -120,11 +121,11 @@ func TestCLIProcessLocalFiles(t *testing.T) {
 				{name: "overlap child first", args: []string{"overlap", "--text-file=label=note", "--path={}"}, errorContains: "duplicate or overlapping"},
 				{name: "whole request first", args: []string{"limits", "--input-file=request.json", "--text-file=a=note"}, errorContains: "cannot be combined"},
 				{name: "whole request last", args: []string{"limits", "--text-file=a=note", "--input-file=request.json"}, errorContains: "cannot be combined"},
-				{name: "missing file", args: []string{"limits", "--text-file=a=missing"}, errorContains: "failed to read"},
-				{name: "failing second file", args: []string{"stamp", "--base64-file=pdf_base64=dummy=pdf", "--base64-file=image_base64=missing", "--edits=[]"}, errorContains: "failed to read"},
-				{name: "directory", args: []string{"limits", "--text-file=a=."}, errorContains: "regular file"},
-				{name: "fifo", args: []string{"limits", "--text-file=a=fifo"}, errorContains: "regular file"},
-				{name: "device", args: []string{"limits", "--text-file=a=/dev/null"}, errorContains: "regular file"},
+				{name: "missing file", status: 1, args: []string{"limits", "--text-file=a=missing"}, errorContains: "failed to read"},
+				{name: "failing second file", status: 1, args: []string{"stamp", "--base64-file=pdf_base64=dummy=pdf", "--base64-file=image_base64=missing", "--edits=[]"}, errorContains: "failed to read"},
+				{name: "directory", status: 1, args: []string{"limits", "--text-file=a=."}, errorContains: "regular file"},
+				{name: "fifo", status: 1, args: []string{"limits", "--text-file=a=fifo"}, errorContains: "regular file"},
+				{name: "device", status: 1, args: []string{"limits", "--text-file=a=/dev/null"}, errorContains: "regular file"},
 				{name: "utf8 refusal", args: []string{"limits", "--text-file=a=dummy=pdf"}, errorContains: "UTF-8"},
 				{name: "file size", args: []string{"limits", "--text-file=a=over-eight"}, errorContains: "8 MiB"},
 				{name: "aggregate size", args: []string{"limits", "--base64-file=a=eight", "--base64-file=b=eight", "--text-file=c=note"}, errorContains: "16 MiB"},
@@ -156,7 +157,13 @@ func TestCLIProcessLocalFiles(t *testing.T) {
 					require.NotContains(t, string(output), "E2_PRIVATE_FILE_MARKER_7b39")
 					require.NotContains(t, string(output), base64.StdEncoding.EncodeToString([]byte("E2_PRIVATE_FILE_MARKER_7b39")))
 					if tc.errorContains != "" {
-						require.Error(t, err, "%s", output)
+						var exit *exec.ExitError
+						require.ErrorAs(t, err, &exit)
+						status := tc.status
+						if status == 0 {
+							status = 2
+						}
+						require.Equal(t, status, exit.ExitCode(), "%s", output)
 						require.Contains(t, string(output), tc.errorContains)
 						require.Equal(t, before, calls.Load(), "local failure dispatched tools/call")
 						return

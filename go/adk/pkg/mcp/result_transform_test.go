@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -60,4 +61,46 @@ func TestCommandResultAdapterReceivesCurrentCallerAndNeverReplaysFailure(t *test
 	_, err = executor.ExecuteCommand(cliSessionContext{Context: t.Context(), id: "bob"}, command, directory)
 	require.ErrorContains(t, err, "adapter refused Bob")
 	require.Equal(t, int32(2), calls.Load())
+	for _, caller := range []string{"alice", "bob"} {
+		for _, save := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/save=%t", caller, save), func(t *testing.T) {
+				env, cleanup, err := PrepareCLIEnvironment(owner, []adk.MCPCLIConfig{binding}, false, nil)(cliSessionContext{Context: t.Context(), id: caller}, t.Context())
+				require.NoError(t, err)
+				defer cleanup()
+				args := []string{"--binding-file", file, "read"}
+				path := filepath.Join(t.TempDir(), "result.json")
+				if save {
+					args = append(args, "--output-file", path)
+				}
+				before := calls.Load()
+				command := exec.CommandContext(t.Context(), binary, args...)
+				command.Env = append(os.Environ(), env...)
+				var stdout, stderr bytes.Buffer
+				command.Stdout, command.Stderr = &stdout, &stderr
+				err = command.Run()
+				require.Equal(t, before+1, calls.Load())
+				if caller == "bob" {
+					var exit *exec.ExitError
+					require.ErrorAs(t, err, &exit)
+					require.Equal(t, 1, exit.ExitCode())
+					require.Contains(t, stderr.String(), "adapter refused Bob")
+					require.Contains(t, stderr.String(), "operation not replayed")
+					require.Empty(t, stdout.String())
+					_, err := os.Stat(path)
+					require.ErrorIs(t, err, os.ErrNotExist)
+					return
+				}
+				require.NoError(t, err, "%s", stderr.String())
+				require.Zero(t, command.ProcessState.ExitCode())
+				data := stdout.Bytes()
+				if save {
+					require.Empty(t, stdout.String())
+					data, err = os.ReadFile(path)
+					require.NoError(t, err)
+				}
+				require.JSONEq(t, `{"_meta":{"count":9007199254740993},"content":[{"type":"text","text":"original"}],"adapted":true}`, string(data))
+				require.Contains(t, string(data), "9007199254740993")
+			})
+		}
+	}
 }

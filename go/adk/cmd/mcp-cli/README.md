@@ -13,6 +13,15 @@ it and materializes per-agent commands from compiled Agent YAML. For public
 configuration and a processing example, see the
 [MCP command usage guide](../../../../docs/architecture/mcp-command-usage.md).
 
+The command surface draws pattern inspiration from
+[MCPorter](https://github.com/openclaw/mcporter), the Python
+[mcp2cli](https://github.com/knowsuchagency/mcp2cli) and Rust
+[mcp2cli](https://github.com/mcp2cli/source-code), and
+[mcpc](https://github.com/apify/mcpc). This fork does not embed or depend on
+those implementations. Their command projection, exact text-file handling,
+complete-result preservation, and resource selection/materialization patterns
+informed this adapter's kagent-owned command plan and local file behavior.
+
 ```json
 {
   "name": "browser",
@@ -75,6 +84,13 @@ schema validates the assembled request and all conditional combinations.
 Defaults in help are documentation only. Omitted flags remain absent, and a group
 is created only when a child is supplied.
 
+Help and invocation use one command plan compiled from live tool discovery.
+Each command refreshes that contract even when managed commands share a retained
+connection. The subprocess parses options once and resolves local files; the
+actor receives typed values without local paths or reconstructed command lines.
+The plan owns projection, help data, assembly and validation. The existing
+executor owns discovery and the tool call; the renderer only formats outcomes.
+
 Use `--input-file` for an explicit empty object, dynamic keys, unprojected fields,
 or reserved literal `help`, `input-file`, `base64-file`, and `text-file` properties. Groups that cannot be
 fully projected retain a JSON-valued wrapper. JSON input must be one object and
@@ -104,10 +120,30 @@ An upstream tool can still echo input in its result envelope.
 
 Successful stdout is the MCP `CallToolResult` JSON envelope, preserving content,
 structured content, and metadata. An `isError` result also appears on stdout,
-with a diagnostic on stderr and exit status 1. Input, protocol, connection, and
-unsupported-interaction errors use stderr and exit status 1. Help uses stdout.
-No failure automatically retries the tool call. HTTP redirects and transport
-replay are disabled for MCP POSTs.
+with a diagnostic on stderr and exit status 1. Help uses stdout. Exit status is
+the same in standalone and managed commands:
+
+| Exit | Meaning |
+| --- | --- |
+| 0 | Successful help or execution |
+| 2 | Invalid usage rejected before tool dispatch: unknown tools/flags, malformed arguments, schema violations, invalid file syntax, UTF-8 or input-size violations |
+| 1 | Operational failure: local I/O, binding/discovery/schema errors, authority, transport, protocol, tool errors, transformation, cancellation or returned finalization errors |
+
+An unreadable input file is an operational failure even though no tool was
+called. Empty or dash output paths are usage errors; an existing destination is
+an operational failure. Joined operational and usage failures exit 1 and retain
+both diagnostics. Nonfatal remote-termination warnings keep a successful command
+at exit 0. Exit 1 never authorizes a retry: execution may already have occurred.
+HTTP redirects and transport replay are disabled for MCP POSTs.
+
+Use `--output-file PATH` to save the complete raw envelope instead of stdout.
+The command exclusively creates a mode-0600 file and retains complete error
+envelopes even at exit 1. Empty content arrays are complete responses. Missing
+responses and failed writes remove the owned incomplete file, with cleanup
+errors reported. The 32 MiB limit includes the trailing newline. The trusted
+managed result adapter runs before rendering or saving; saving makes no claim
+about provider-specific document validity. See the usage guide for processing
+results from Bash, which reports stderr when commands fail.
 
 Standalone SIGINT, SIGTERM, and the binding timeout cancel local work and close
 connection resources. Inside native Bash, the command delegates to its actor's
