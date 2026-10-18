@@ -86,9 +86,10 @@ func TestIntegratedCLIUsesCommandFilesAndPreservesWireNumbers(t *testing.T) {
 	require.NoError(t, err, "%s", output)
 	var calls atomic.Int32
 	server := mcpsdk.NewServer(&mcpsdk.Implementation{Name: "wire", Version: "1"}, nil)
-	server.AddTool(&mcpsdk.Tool{Name: "record", InputSchema: json.RawMessage(`{"type":"object","properties":{"text":{"type":"string"},"count":{"type":"integer"}},"required":["text","count"],"additionalProperties":false}`)}, func(_ context.Context, request *mcpsdk.CallToolRequest) (*mcpsdk.CallToolResult, error) {
+	server.AddTool(&mcpsdk.Tool{Name: "record", InputSchema: json.RawMessage(`{"type":"object","properties":{"body":{"type":"object","properties":{"text":{"type":"string"},"count":{"type":"integer"}},"required":["text","count"],"additionalProperties":false}},"required":["body"],"additionalProperties":false}`)}, func(_ context.Context, request *mcpsdk.CallToolRequest) (*mcpsdk.CallToolResult, error) {
 		calls.Add(1)
 		require.Contains(t, string(request.Params.Arguments), "9007199254740993")
+		require.Contains(t, string(request.Params.Arguments), `"body":{`)
 		return &mcpsdk.CallToolResult{StructuredContent: map[string]any{"count": int64(9007199254740993)}}, nil
 	})
 	remote := httptest.NewServer(mcpsdk.NewStreamableHTTPHandler(func(*http.Request) *mcpsdk.Server { return server }, nil))
@@ -99,17 +100,22 @@ func TestIntegratedCLIUsesCommandFilesAndPreservesWireNumbers(t *testing.T) {
 	directory := t.TempDir()
 	file := filepath.Join(directory, "binding.json")
 	require.NoError(t, os.WriteFile(file, data, 0600))
-	require.NoError(t, os.WriteFile(filepath.Join(directory, "arguments.json"), []byte(`{"text":"file","count":9007199254740993}`), 0600))
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "arguments.json"), []byte(`{"body":{"text":"file","count":9007199254740993}}`), 0600))
 	executor := tools.NewCommandExecutor(tools.ExecutionConfig{PrepareEnvironment: PrepareCLIEnvironment(t.Context(), []adk.MCPCLIConfig{binding}, false, nil)})
 	base := fmt.Sprintf("%q --binding-file %q", binary, file)
 	for _, command := range []string{
 		base + " record --input-file arguments.json",
-		`printf '%s' '{"text":"stdin","count":9007199254740993}' | ` + base + " record --input-file -",
+		`printf '%s' '{"body":{"text":"stdin","count":9007199254740993}}' | ` + base + " record --input-file -",
 		base + ` record --text '--input-file' --count 9007199254740993`,
 	} {
 		result, err := executor.ExecuteCommand(cliSessionContext{Context: t.Context(), id: "alice"}, command, directory)
 		require.NoError(t, err)
 		require.Contains(t, result, "9007199254740993")
+	}
+	for _, command := range []string{base + " record --help", base + " record --help schema"} {
+		result, err := executor.ExecuteCommand(cliSessionContext{Context: t.Context(), id: "alice"}, command, directory)
+		require.NoError(t, err)
+		require.Contains(t, result, "count")
 	}
 	for _, command := range []string{base + " excluded", base + " record --text ok --count bad", base + " record --input-file arguments.json --text mixed"} {
 		_, err := executor.ExecuteCommand(cliSessionContext{Context: t.Context(), id: "alice"}, command, directory)

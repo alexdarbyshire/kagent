@@ -29,7 +29,6 @@ func TestCLIProcessTypedArguments(t *testing.T) {
 	calls := make(chan json.RawMessage, 100)
 	var count atomic.Int32
 	var requests atomic.Int32
-	discovery := make(chan struct{}, 100)
 	var ambiguous atomic.Int32
 	started := make(chan struct{}, 1)
 	release := make(chan struct{})
@@ -88,9 +87,6 @@ func TestCLIProcessTypedArguments(t *testing.T) {
 				return
 			}
 			r.Body = io.NopCloser(bytes.NewReader(body))
-			if bytes.Contains(body, []byte(`"method":"tools/list"`)) {
-				discovery <- struct{}{}
-			}
 			if bytes.Contains(body, []byte(`"text":"wire-json"`)) || bytes.Contains(body, []byte(`"text":"wire-sse"`)) || bytes.Contains(body, []byte(`"text":"wire-error"`)) {
 				ambiguous.Add(1)
 				var request struct {
@@ -262,7 +258,7 @@ func TestCLIProcessTypedArguments(t *testing.T) {
 			t.Fatalf("%s %s %v", out, stderr, err)
 		}
 		out, stderr, err = run("", "record", "--help")
-		for _, expected := range []string{"--property", "--input-file", "Required: text", `"nullable"`} {
+		for _, expected := range []string{"--property", "--input-file", "--text <literal text> (string; required)", "--nullable <JSON or literal text>", "--help schema"} {
 			if !strings.Contains(out, expected) {
 				t.Fatalf("help missing %s: %s %s %v", expected, out, stderr, err)
 			}
@@ -419,11 +415,10 @@ func TestCLIProcessTypedArguments(t *testing.T) {
 
 	for _, mode := range []string{"signal", "timeout"} {
 		t.Run("open stdin "+mode, func(t *testing.T) {
-			for len(discovery) > 0 {
-				<-discovery
-			}
 			if mode == "timeout" {
 				writeBinding(t, `{"name":"recording","http":{"params":{"url":"`+httpServer.URL+`","timeout":0.3}}}`)
+			} else {
+				writeBinding(t, `{"name":"recording","http":{"params":{"url":"`+httpServer.URL+`","timeout":5}}}`)
 			}
 			before := count.Load()
 			cmd := exec.Command(binary, "--binding-file", binding, "record", "--input-file", "-")
@@ -442,14 +437,22 @@ func TestCLIProcessTypedArguments(t *testing.T) {
 			if err := cmd.Start(); err != nil {
 				t.Fatal(err)
 			}
-			select {
-			case <-discovery:
-			case <-time.After(5 * time.Second):
-				_ = cmd.Process.Kill()
-				_ = cmd.Wait()
-				t.Fatal("discovery did not complete")
-			}
 			if mode == "signal" {
+				// More than the pipe capacity must be consumed before signaling, so
+				// cancellation exercises an active stdin read, not process startup.
+				reading := make(chan error, 1)
+				go func() { _, err := io.WriteString(pipe, strings.Repeat(" ", 2<<20)); reading <- err }()
+				select {
+				case err := <-reading:
+					if err != nil {
+						t.Fatal(err)
+					}
+				case <-time.After(5 * time.Second):
+					_ = cmd.Process.Kill()
+					_ = cmd.Wait()
+					<-reading
+					t.Fatal("stdin was not consumed")
+				}
 				if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
 					t.Fatal(err)
 				}
@@ -460,6 +463,16 @@ func TestCLIProcessTypedArguments(t *testing.T) {
 			case err := <-done:
 				if err == nil || diagnostic.Len() == 0 || out.Len() != 0 {
 					t.Fatalf("%s %s %v", &out, &diagnostic, err)
+				}
+				if cmd.ProcessState.ExitCode() != 1 {
+					t.Fatalf("canceled input exit = %d, want 1: %s", cmd.ProcessState.ExitCode(), &diagnostic)
+				}
+				want := "context canceled"
+				if mode == "timeout" {
+					want = "context deadline exceeded"
+				}
+				if !strings.Contains(diagnostic.String(), want) {
+					t.Fatalf("missing %q: %s", want, &diagnostic)
 				}
 			case <-time.After(5 * time.Second):
 				_ = cmd.Process.Kill()
@@ -518,7 +531,7 @@ func TestCLIProcessTypedArguments(t *testing.T) {
 		if err == nil || out != "" || stderr == "" || count.Load() != before {
 			t.Fatalf("invalid fractional input dispatched: %s %s %v", out, stderr, err)
 		}
-		out, stderr, err = run("", "fractional", "--help")
+		out, stderr, err = run("", "fractional", "--help", "schema")
 		if err != nil || !strings.Contains(out, `"minimum":1.0000000000000001`) {
 			t.Fatalf("help rounded schema: %s %s %v", out, stderr, err)
 		}

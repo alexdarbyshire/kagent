@@ -1,0 +1,51 @@
+{
+  "required": [
+    "path"
+  ],
+  "properties": {
+    "body": {
+      "$ref": "#/$defs/CreateIssueCommentOption"
+    },
+    "path": {
+      "required": [
+        "owner",
+        "repo",
+        "index"
+      ],
+      "properties": {
+        "owner": {
+          "type": "string",
+          "description": "owner of the repo"
+        },
+        "repo": {
+          "type": "string",
+          "description": "name of the repo"
+        },
+        "index": {
+          "type": "integer",
+          "format": "int64",
+          "description": "index of the issue"
+        }
+      },
+      "type": "object"
+    }
+  },
+  "type": "object",
+  "$defs": {
+    "CreateIssueCommentOption": {
+      "description": "CreateIssueCommentOption options for creating a comment on an issue",
+      "x-go-package": "gitea.dev/modules/structs",
+      "type": "object",
+      "properties": {
+        "body": {
+          "description": "Body is the comment text content",
+          "x-go-name": "Body",
+          "type": "string"
+        }
+      },
+      "required": [
+        "body"
+      ]
+    }
+  }
+}

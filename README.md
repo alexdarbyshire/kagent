@@ -34,7 +34,7 @@
 
 ### This fork
 
-The `feature/mcp-cli` branch contains **mcp2cli**, an agentically developed proof of concept in use by Alex Darbyshire's kagent estate. It exposes selected MCP tools as commands for agents. It is not intended or developed for an upstream merge, though the upstream community is welcome to explore the idea. See [fork maintenance](FORK-MAINTENANCE.md) for upstream synchronization and estate promotion.
+The `feature/mcp-cli` branch contains **mcp2cli**, an agentically developed proof of concept in use by Alex Darbyshire's kagent estate. It exposes selected MCP tools as commands for agents. It draws pattern inspiration from [MCPorter](https://github.com/openclaw/mcporter), the Python [mcp2cli](https://github.com/knowsuchagency/mcp2cli) and Rust [mcp2cli](https://github.com/mcp2cli/source-code), and [mcpc](https://github.com/apify/mcpc); it does not embed or depend on those implementations. It is not intended or developed for an upstream merge, though the upstream community is welcome to explore the idea. See [fork maintenance](FORK-MAINTENANCE.md) for upstream synchronization and estate promotion.
 
 <div align="center">
   <img src="img/kagent-agents-ui.gif" alt="Kagent Agents UI" width="800">
