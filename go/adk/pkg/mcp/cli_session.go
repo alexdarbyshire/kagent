@@ -152,10 +152,10 @@ func cliCommandSocket() string {
 	return socket
 }
 
-func runActorCLI(ctx context.Context, socket, name string, command cliCommandRequest, stdout io.Writer) error {
+func runActorCLI(ctx context.Context, socket, name string, command cliCommandRequest) (cliOutcome, error) {
 	data, err := json.Marshal(command)
 	if err != nil {
-		return fmt.Errorf("failed to encode MCP command: %w", err)
+		return nil, fmt.Errorf("failed to encode MCP command: %w", err)
 	}
 	pool := &http.Transport{DisableKeepAlives: true, DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 		return (&net.Dialer{}).DialContext(ctx, "unix", socket)
@@ -164,27 +164,27 @@ func runActorCLI(ctx context.Context, socket, name string, command cliCommandReq
 	client := &http.Client{Transport: pool}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://invocation/command/"+url.PathEscape(name), bytes.NewReader(data))
 	if err != nil {
-		return fmt.Errorf("failed to create MCP command request: %w", err)
+		return nil, fmt.Errorf("failed to create MCP command request: %w", err)
 	}
 	response, err := client.Do(request)
 	if err != nil {
-		return fmt.Errorf("MCP invocation command failed (not retried): %w", err)
+		return nil, fmt.Errorf("MCP invocation command failed (not retried): %w", err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return fmt.Errorf("MCP invocation command failed with status %d", response.StatusCode)
+		return nil, fmt.Errorf("MCP invocation command failed with status %d", response.StatusCode)
 	}
 	data, err = io.ReadAll(response.Body)
 	if err != nil {
-		return fmt.Errorf("failed to read MCP command result: %w", err)
+		return nil, fmt.Errorf("failed to read MCP command result: %w", err)
 	}
 	result, err := decodeCLIResponse(data)
 	if err != nil {
-		return fmt.Errorf("failed to decode MCP command result: %w", err)
+		return nil, fmt.Errorf("failed to decode MCP command result: %w", err)
 	}
 	outcome, err := result.outcome(name, command)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return renderCLIOutcome(stdout, outcome)
+	return outcome, nil
 }

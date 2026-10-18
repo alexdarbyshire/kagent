@@ -52,6 +52,8 @@ type cliLocalCommand struct {
 	request    cliCommandRequest
 	inputPath  string
 	outputPath string
+	sourcePath string
+	save       *cliSaveRequest
 	files      []cliLocalFile
 }
 
@@ -64,6 +66,10 @@ type cliLocalFile struct {
 // Parse once before any local I/O. Values that resemble options are consumed as
 // values here and cannot become options again across the managed handoff.
 func parseCLICommand(args []string) (cliLocalCommand, error) {
+	return parseCLILocalCommand(args, false)
+}
+
+func parseCLILocalCommand(args []string, extract bool) (cliLocalCommand, error) {
 	command := cliLocalCommand{request: cliCommandRequest{Kind: cliCatalogKind}}
 	if len(args) == 0 || (len(args) == 1 && args[0] == "--help") {
 		return command, nil
@@ -72,11 +78,11 @@ func parseCLICommand(args []string) (cliLocalCommand, error) {
 		return command, cliUsageErrorf("--help must be used alone")
 	}
 	command.request.Tool = args[0]
-	if len(args) == 2 && args[1] == "--help" {
+	if !extract && len(args) == 2 && args[1] == "--help" {
 		command.request.Kind = cliOperationKind
 		return command, nil
 	}
-	if len(args) == 3 && args[1] == "--help" && args[2] == "schema" {
+	if !extract && len(args) == 3 && args[1] == "--help" && args[2] == "schema" {
 		command.request.Kind = cliSchemaKind
 		return command, nil
 	}
@@ -86,8 +92,25 @@ func parseCLICommand(args []string) (cliLocalCommand, error) {
 		return command, err
 	}
 	inputs := 0
+	verify := ""
 	for _, option := range options {
+		if extract {
+			switch option.name {
+			case "from-file", "save-text", "save-base64", "save-text-dir", "save-base64-dir", "verify-sha256":
+			default:
+				return command, cliUsageErrorf("unsupported extract option")
+			}
+		}
 		switch option.name {
+		case "from-file":
+			if !extract {
+				command.request.Assignments = append(command.request.Assignments, cliAssignment{Name: option.name, Value: option.value})
+				continue
+			}
+			if command.sourcePath != "" || option.value == "" || option.value == "-" {
+				return command, cliUsageErrorf("extract requires one --from-file regular file path")
+			}
+			command.sourcePath = option.value
 		case "output-file":
 			if command.outputPath != "" {
 				return command, cliUsageErrorf("duplicate --output-file")
@@ -96,6 +119,20 @@ func parseCLICommand(args []string) (cliLocalCommand, error) {
 				return command, cliUsageErrorf("--output-file requires a new file path, not empty or -")
 			}
 			command.outputPath = option.value
+		case "save-text", "save-base64", "save-text-dir", "save-base64-dir":
+			if command.save != nil {
+				return command, cliUsageErrorf("only one save request is allowed")
+			}
+			name, path, ok := strings.Cut(option.value, "=")
+			if !ok || !cliFlagName(name) || path == "" || path == "-" {
+				return command, cliUsageErrorf("--%s requires NAME=PATH with a nonempty name and a new file path", option.name)
+			}
+			command.save = &cliSaveRequest{name: name, path: path, base64: strings.HasPrefix(option.name, "save-base64"), collection: strings.HasSuffix(option.name, "-dir")}
+		case "verify-sha256":
+			if verify != "" || !cliFlagName(option.value) {
+				return command, cliUsageErrorf("--verify-sha256 requires one nonempty result name")
+			}
+			verify = option.value
 		case "input-file":
 			inputs++
 			command.request.Input = &cliJSONInput{}
@@ -109,6 +146,18 @@ func parseCLICommand(args []string) (cliLocalCommand, error) {
 		default:
 			command.request.Assignments = append(command.request.Assignments, cliAssignment{Name: option.name, Value: option.value})
 		}
+	}
+	if extract && (command.sourcePath == "" || command.save == nil) {
+		return command, cliUsageErrorf("extract requires --from-file and one save request")
+	}
+	if !extract && command.save != nil && command.outputPath == "" {
+		return command, cliUsageErrorf("saving a named output requires --output-file")
+	}
+	if verify != "" {
+		if command.save == nil {
+			return command, cliUsageErrorf("--verify-sha256 requires a save request")
+		}
+		command.save.digest = verify
 	}
 	if inputs > 0 && (inputs != 1 || len(command.files) > 0 || len(command.request.Assignments) > 0) {
 		return command, cliUsageErrorf("--input-file cannot be combined with argument flags")
@@ -169,7 +218,7 @@ func cliOptions(args []string) ([]cliOption, error) {
 
 func cliReservedFlag(name string) bool {
 	switch name {
-	case "help", "input-file", "base64-file", "text-file", "output-file":
+	case "help", "input-file", "base64-file", "text-file", "output-file", "save-text", "save-base64", "save-text-dir", "save-base64-dir", "verify-sha256":
 		return true
 	default:
 		return false

@@ -43,7 +43,11 @@ func prepareCLIFileValues(ctx context.Context, inputs []cliLocalFile) ([]cliAssi
 	return files, nil
 }
 
-func readCLIValueFile(ctx context.Context, path string, limit int) (data []byte, err error) {
+func readCLIValueFile(ctx context.Context, path string, limit int) ([]byte, error) {
+	return readCLIBoundedFile(ctx, path, limit, cliUsageErrorf("file inputs exceed the 8 MiB per-file or 16 MiB aggregate limit"))
+}
+
+func readCLIBoundedFile(ctx context.Context, path string, limit int, limitErr error) (data []byte, err error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -66,7 +70,7 @@ func readCLIValueFile(ctx context.Context, path string, limit int) (data []byte,
 		return nil, errors.New("input must be a regular file")
 	}
 	if info.Size() > int64(limit) {
-		return nil, cliUsageErrorf("file inputs exceed the 8 MiB per-file or 16 MiB aggregate limit")
+		return nil, limitErr
 	}
 	reader := struct {
 		io.Reader
@@ -77,7 +81,7 @@ func readCLIValueFile(ctx context.Context, path string, limit int) (data []byte,
 		return nil, err
 	}
 	if len(data) > limit {
-		return nil, cliUsageErrorf("file inputs exceed the 8 MiB per-file or 16 MiB aggregate limit")
+		return nil, limitErr
 	}
 	return data, ctx.Err()
 }

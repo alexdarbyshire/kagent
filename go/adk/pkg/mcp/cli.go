@@ -32,6 +32,9 @@ type cliBinding = adk.MCPCLIConfig
 // RunCLI executes the MCP command interface using a private binding file.
 // The executable owns signal handling and stderr diagnostics.
 func RunCLI(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer) (err error) {
+	if len(args) > 0 && args[0] == "extract" {
+		return runCLIExtract(ctx, args, stdout)
+	}
 	if len(args) < 2 || args[0] != "--binding-file" {
 		return cliUsageErrorf("usage: mcp-cli --binding-file PATH [tool [--property value | --input-file PATH|-] | --help]")
 	}
@@ -73,28 +76,24 @@ func RunCLI(ctx context.Context, args []string, stdin io.Reader, stdout io.Write
 	if err != nil {
 		return err
 	}
-	outputPath := command.outputPath
-	if outputPath != "" {
-		if err := ctx.Err(); err != nil {
+	outputs, err := reserveCLIOutputs(ctx, command)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, outputs.finish(ctx)) }()
+	if socket != "" {
+		outcome, err := runActorCLI(ctx, socket, binding.Name, request)
+		if err != nil {
 			return err
 		}
-		file, err := os.OpenFile(outputPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
-		if err != nil {
-			return fmt.Errorf("failed to create MCP output file (tool not called): %w", err)
-		}
-		output := &cliOutputFile{file: file}
-		stdout = output
-		defer func() { err = errors.Join(err, output.finish(ctx)) }()
-	}
-	if socket != "" {
-		return runActorCLI(ctx, socket, binding.Name, request, stdout)
+		return outputs.handle(ctx, stdout, outcome, command.save)
 	}
 	remote, err := openCLISession(ctx, binding, nil)
 	if err != nil {
 		return err
 	}
 	defer func() { err = errors.Join(err, remote.Close()) }()
-	return renderCLIOutcome(stdout, runCLICommand(ctx, binding, request, remote))
+	return outputs.handle(ctx, stdout, runCLICommand(ctx, binding, request, remote), command.save)
 }
 
 // cliRemoteSession owns transport resources independently of a command process.

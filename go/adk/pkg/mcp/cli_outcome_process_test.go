@@ -148,7 +148,7 @@ func TestCLIProcessUsageStatus(t *testing.T) {
 						require.Contains(t, stdout.String(), "Exit 1 never authorizes a retry")
 					}
 					if tc.name == "operation help" {
-						for _, text := range []string{"--value <JSON> (integer; required)", "--text <literal text>", "--child <literal text>", "Text description", "Default (documentation only): 9007199254740993", "--help schema", "--input-file", "--base64-file NAME=PATH", "--text-file NAME=PATH", "8 MiB", "16 MiB", "24 MiB", "--output-file PATH", "32 MiB"} {
+						for _, text := range []string{"--value <JSON> (integer; required)", "--text <literal text>", "--child <literal text>", "Text description", "Default (documentation only): 9007199254740993", "--help schema", "--input-file", "--base64-file NAME=PATH", "--text-file NAME=PATH", "8 MiB", "16 MiB", "24 MiB", "--output-file PATH", "32 MiB", "--save-text NAME=PATH", "--save-base64 NAME=PATH", "--verify-sha256 NAME", "content.resource.blob"} {
 							require.Contains(t, stdout.String(), text)
 						}
 					}
@@ -284,7 +284,7 @@ func TestCLIProcessValidatesPrivateOutcomes(t *testing.T) {
 			t.Cleanup(server.Close)
 			args := tc.args
 			if args == nil {
-				args = []string{"echo", "--output-file=result.json"}
+				args = []string{"echo", "--output-file=result.json", "--save-text=text=artifact"}
 			}
 			command := exec.CommandContext(t.Context(), binary, append([]string{"--binding-file", binding}, args...)...)
 			command.Env = append(os.Environ(), cliInvocationSocket+"="+socket)
@@ -306,6 +306,60 @@ func TestCLIProcessValidatesPrivateOutcomes(t *testing.T) {
 			require.Equal(t, int32(1), requests.Load(), "private command must not replay")
 			_, err = os.Stat(filepath.Join(command.Dir, "result.json"))
 			require.ErrorIs(t, err, os.ErrNotExist)
+			_, err = os.Stat(filepath.Join(command.Dir, "artifact"))
+			require.ErrorIs(t, err, os.ErrNotExist)
 		})
 	}
+}
+
+func TestCLIProcessSaveResultWithReturnedCloseError(t *testing.T) {
+	binary := filepath.Join(t.TempDir(), "mcp-cli")
+	build, err := exec.Command("go", "build", "-o", binary, "../../cmd/mcp-cli").CombinedOutput()
+	require.NoError(t, err, "%s", build)
+	directory, err := os.MkdirTemp("", "mcp-close-")
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, os.RemoveAll(directory)) })
+	listener, err := net.Listen("unix", filepath.Join(directory, "socket"))
+	require.NoError(t, err)
+	var requests atomic.Int32
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		for _, local := range []string{"save-text", "output-file", "artifact", "response.json"} {
+			if bytes.Contains(body, []byte(local)) {
+				t.Errorf("local output intention crossed socket: %s", local)
+			}
+		}
+		_, err = io.WriteString(w, `{"kind":"result","result":{"content":[{"type":"text","text":"complete"}]},"failure":{"category":"operational","diagnostic":"returned close failure"}}`)
+		if err != nil {
+			t.Error(err)
+		}
+	}))
+	require.NoError(t, server.Listener.Close())
+	server.Listener = listener
+	server.Start()
+	t.Cleanup(server.Close)
+	binding := filepath.Join(directory, "binding.json")
+	require.NoError(t, os.WriteFile(binding, []byte(`{"name":"close"}`), 0600))
+	command := exec.CommandContext(t.Context(), binary, "--binding-file", binding, "echo", "--save-text=text=artifact", "--output-file=response.json")
+	command.Dir = directory
+	command.Env = append(os.Environ(), cliInvocationSocket+"="+filepath.Join(directory, "socket"))
+	var stdout, stderr bytes.Buffer
+	command.Stdout, command.Stderr = &stdout, &stderr
+	var exit *exec.ExitError
+	require.ErrorAs(t, command.Run(), &exit)
+	require.Equal(t, 1, exit.ExitCode())
+	require.Contains(t, stderr.String(), "returned close failure")
+	require.Empty(t, stdout.String())
+	require.EqualValues(t, 1, requests.Load())
+	artifact, err := os.ReadFile(filepath.Join(directory, "artifact"))
+	require.NoError(t, err)
+	require.Equal(t, "complete", string(artifact))
+	raw, err := os.ReadFile(filepath.Join(directory, "response.json"))
+	require.NoError(t, err)
+	require.Equal(t, "{\"content\":[{\"type\":\"text\",\"text\":\"complete\"}]}\n", string(raw))
 }

@@ -125,7 +125,9 @@ combinations. Defaults are documented without being inserted; omitted groups
 stay absent until a child is supplied.
 
 For explicit empty objects, dynamic keys, unprojected fields, or reserved literal
-properties named `help`, `input-file`, `base64-file`, `text-file` or `output-file`, supply one JSON object instead:
+properties named `help`, `input-file`, `base64-file`, `text-file`, `output-file`,
+`save-text`, `save-base64`, `save-text-dir`, `save-base64-dir` or
+`verify-sha256`, supply one JSON object instead:
 
 ```sh
 cat > arguments.json <<'JSON'
@@ -218,7 +220,161 @@ trusted managed result adapter runs before output reaches stdout or the file.
 Missing responses and failed writes remove the incomplete file; cleanup failures
 are reported. A local save failure never retries the remote operation. Saving
 raw JSON does not decode a PDF/image, fetch a URL, or establish provider-specific
-success. Selected text and explicit base64 decoding remain separate work.
+success.
+
+### Save one named string
+
+Add one `--save-text NAME=PATH` or `--save-base64 NAME=PATH` to save a returned
+string without emitting its contents on stdout. Both require `--output-file`
+for the complete source response. For example, when the returned object contains
+`output.base64_string` and `output.sha256`:
+
+```bash
+documents convert --input-file arguments.json \
+  --save-base64 output.base64_string=document.bin \
+  --verify-sha256 output.sha256 --output-file response.json
+```
+
+Names come from the actual result; no output schema or pre-call discovery is
+required. Top-level `structuredContent` properties are literal names. Immediate
+children of object properties also have `group.child` names and unique short
+names. Literal names take precedence, including names containing dots. Ambiguous
+generated names fail; deeper objects and arrays are not flattened.
+
+Native MCP content names are `content.text`, `content.image`,
+`content.resource.text` and `content.resource.blob`. Shortcuts `text`, `image`,
+`resource.text` and `resource.blob` work when unoccupied and unambiguous. Exactly
+one matching string is required, including for native content: two image blocks
+are not a request to save the first image. When `structuredContent` is present,
+compatibility text blocks are suppressed but native images and resources remain
+available. Non-object `structuredContent` fails selection. Without it, text is
+literal even if it contains JSON; there is no embedded-JSON navigation.
+
+Text saving preserves UTF-8 bytes and newlines, including an empty file. Base64
+saving requires canonical RFC 4648 standard padded encoding without whitespace.
+Selected paths reject duplicate JSON members, malformed UTF-8 and unpaired
+surrogates. Unselected fields, duplicate metadata and exact numbers remain opaque
+in the raw envelope. No MIME, filename, URL or document-validity inference occurs.
+The optional `--verify-sha256 NAME` selects a 64-hex-digit expected digest and
+compares it with the saved bytes; digest-looking fields are ignored unless chosen.
+
+Save options accept both `--option value` and `--option=value`; split `NAME=PATH`
+at the first equals sign so paths can contain equals signs. They compose with
+all input modes. A command accepts only one save request and one digest option.
+The source and artifact must be distinct new mode-0600 files, reserved before
+dispatch, with existing parents. Existing files, symlinks, directories and FIFOs
+are refused with zero tool calls. The raw file is finalized first; selection,
+conversion, integrity or artifact failures retain it and remove the owned
+incomplete artifact, preserving replacements at the same path. Empty artifacts
+are synced and closed too. A mechanically extractable error result may be saved,
+while its original operational failure still determines exit status.
+
+The 32 MiB source limit includes the saved trailing newline. Selected strings and
+text files are limited to 32 MiB; decoded binary files to 24 MiB. The source bound
+also limits how much selected data can fit in an envelope. Selection and local
+I/O failures exit 1 and never repeat the remote call. These limits govern local
+saving, not transport buffering or provider success.
+
+### Save a named collection
+
+Use `--save-text-dir GROUP.FIELD=DIR` or `--save-base64-dir GROUP.FIELD=DIR`
+for all rows of a top-level array of objects. Native content names also select
+all matching blocks in wire order. The command still accepts exactly one save
+request, requires `--output-file`, and keeps stdout empty. For a PDF render result
+whose `images` rows contain `base64_string` and `sha256`:
+
+```bash
+documents render --input-file render.json \
+  --save-base64-dir images.base64_string=pages \
+  --verify-sha256 images.sha256 --output-file render-response.json
+```
+
+The same mechanics accept a browser-shaped `downloads.dataBase64` array when a
+provider returns one. Saving does not request download bytes, fetch URLs, poll,
+consume downloads, acknowledge them, or change provider state. Provider inputs
+choose the returned resources; no local row filter or first-item fallback exists.
+
+Every row must be an object with the selected string member. Missing arrays,
+missing/null/non-string members and skipped or unreadable download data fail the
+entire collection. An empty existing array succeeds with zero files, without
+claiming its selected member was observed. Array fields require `GROUP.FIELD`;
+they do not gain short aliases or recursive navigation. Literal dotted properties
+still take precedence and fail collection selection rather than falling back.
+Single-file flags continue to require one string and never project an array.
+An explicitly selected collection digest must come from the same array group and
+same row; equally sized unrelated arrays cannot be paired. Native content groups
+may use a singular named digest, checked against every selected member.
+
+The directory must be new, with an existing parent. It is reserved before dispatch
+with mode 0700; existing directories, files and symlinks are refused. The raw path
+must be distinct and outside it. Files are mode 0600, named `0001`, `0002`, and so
+on in response order, without inferred extensions. Page numbers, IDs, suggested
+filenames, MIME types and URLs remain in the complete raw envelope and never
+become filesystem paths.
+
+`manifest.json` is written and finalized after all numbered files. Its version-1
+record contains `version`, the requested `target`, `conversion` (`text` or
+`base64`), `source_sha256` over the exact retained raw file including its trailing
+newline, and a `files` array. Each file record contains `name`, zero-based
+`source_index` in the original array or native content, `length` in bytes, and
+computed `sha256`. No provider payload is copied into the manifest. Empty
+collections have `files: []`.
+
+Consumers treat a directory without a complete manifest as unfinished. A failure
+or cancellation removes owned collection files and the owned directory, preserves
+replacements, reports cleanup failures and retains finalized raw JSON. A crash can
+leave an unfinished directory; there is no cross-file transaction or automatic
+crash cleanup. Mechanically saved tool-error or unsupported results still exit 1.
+
+Collections allow at most 100 files and 32 MiB aggregate materialized payload.
+The manifest is limited to 1 MiB. Existing per-file and 32 MiB raw limits still
+apply, including gateway JSON-text compatibility copies. Several 20 MiB browser
+downloads will not fit; exceeding a limit fails without another call or a larger
+limit.
+
+### Recover from a saved result
+
+When live selection, decoding, digest verification or artifact writing fails,
+retain the complete response and correct the local save request. Recovery uses
+the packaged `mcp-cli` executable directly, even after the provider or managed
+socket becomes unavailable:
+
+```sh
+mcp-cli extract --from-file response.json \
+  --save-base64 output.base64_string=recovered.bin \
+  --verify-sha256 output.sha256
+mcp-cli extract --from-file render-response.json \
+  --save-base64-dir images.base64_string=recovered-pages
+mcp-cli extract --help
+```
+
+These are illustrative field names; choose fields present in the retained
+envelope. Recovery accepts the same four save options, digest selection and
+name/conversion/collection rules as live saving. It reads one bounded regular
+file and never reads a binding, opens a managed socket, discovers tools,
+transforms the saved result again or calls a provider. No additional
+`--output-file`, stdin source or live input flags are accepted.
+
+The source must contain one MCP result envelope, not a JSON-RPC wrapper, within
+32 MiB including whitespace. Source bytes remain unchanged on success and
+failure. The existing exclusive destination rules reject source/output aliases,
+clobbering and symlink destinations. Collections hash the exact source bytes,
+so extracting the same retained file produces the same manifest provenance.
+
+Malformed syntax, JSON or envelope structure exits 2. Source I/O, size bounds,
+materialization and output failures exit 1. Embedded `isError: true` or an
+unsupported `resultType` also exits 1 while allowing mechanical saving. Empty
+`content` is valid but offers no native output. Exit 0 reports mechanical success;
+it cannot reconstruct or certify the original process's transport,
+transformation or teardown status. Extraction stdout remains empty and failures
+never authorize replaying the original tool call.
+
+The optional `TestCLIPinnedGatewayProjection` test uses synthetic loopback HTTP
+responses and a SHA-256-pinned agentgateway 1.6.0 binary. Set
+`KAGENT_TEST_AGENTGATEWAY` to that binary and `KAGENT_TEST_MCP_CLI` to the candidate
+executable; the test requires Python 3 and otherwise reports an explicit skip
+when binary paths are unset. It verifies JSON/base64 and native PNG recovery and
+characterizes raw PDF as lossy text. Saving cannot restore bytes lost upstream.
 
 The Go Bash tool returns an execution error when a shell command exits nonzero,
 so do not rely on it displaying that command's captured stdout. Save the
@@ -265,10 +421,22 @@ outcomes before rendering or saving. Its checks apply to adapter-owned fields;
 provider result fields remain under the existing MCP protocol semantics.
 
 The command subprocess parses option syntax once, reads local input files and
-reserves the output destination. Its typed invocation carries assignments or
+reserves raw and artifact destinations. Its typed invocation carries assignments or
 whole-request bytes across the private socket; local paths and reconstructed
 argv do not cross that boundary. It also owns output finalization and combines
-execution diagnostics with local write/cleanup errors.
+execution diagnostics with local write/cleanup errors. Standalone and managed
+execution deliver their typed outcome to the same command-local handler, which
+finalizes raw output before named materialization. There is no stdout reparsing
+or second result request. Pure result projection owns names, source identities,
+selected-string conversion and same-row digest checking; the local writer owns
+exclusive reservation, sync/close, collection manifests and cleanup. Collection
+children use the reserved directory handle for writes and cleanup, so replacing
+its public path cannot redirect them into a different directory.
+Local `extract` branches before binding and socket handling. Its bounded source
+reader and envelope validation feed the same materializer and local writer,
+without a client or a second transformation. Protocol status fields are checked
+while unselected provider values remain opaque; selected paths retain the shared
+strict string, duplicate-member, conversion and integrity checks.
 
 Each selected tool gets one private, immutable command plan from that command's
 live discovery. The plan owns tool identity, original schema bytes, the compiled

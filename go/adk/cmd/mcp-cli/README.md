@@ -6,12 +6,46 @@ Build from `go/`:
 go build -o mcp-cli ./adk/cmd/mcp-cli
 ```
 
-The bridge consumes a private binding file supplied by its launcher. It is not
+For live calls, the bridge consumes a private binding file supplied by its launcher. It is not
 an endpoint configuration interface for the model. This standalone executable
 supports Linux with procfs, Streamable HTTP, and SSE. The Go ADK image packages
 it and materializes per-agent commands from compiled Agent YAML. For public
 configuration and a processing example, see the
 [MCP command usage guide](../../../../docs/architecture/mcp-command-usage.md).
+
+## Recover a saved result locally
+
+The same executable can extract named strings from a saved MCP result without
+a binding, credentials, discovery or a running provider. This synthetic example
+creates a two-byte file containing `00 ff`, with empty stdout:
+
+```sh
+printf '%s\n' '{"content":[],"structuredContent":{"output":{"base64_string":"AP8="}}}' > sample-result.json
+./mcp-cli extract --from-file sample-result.json \
+  --save-base64 output.base64_string=sample.bin
+./mcp-cli extract --help
+```
+
+Use this mode after a live `--save-*` operation fails locally but leaves its
+complete `--output-file` response. Correct the target, digest selection or output
+path and extract from that file; the tool is never called again. `--save-text`
+preserves a string's UTF-8 bytes. `--save-text-dir` and `--save-base64-dir` save
+collections with the same ordinal files and manifest as live saving. Optional
+`--verify-sha256 NAME` checks a digest selected from the same result. See
+[named output and recovery rules](../../../../docs/architecture/mcp-command-usage.md#recover-from-a-saved-result)
+for naming, bounds and status semantics.
+
+The source must be one regular file containing an MCP result envelope, at most
+32 MiB. Source bytes remain unchanged; collection manifests hash those exact
+bytes, including any whitespace. Destinations must be new files or directories;
+existing paths and symlinks are refused. Recovery accepts no `--output-file`,
+stdin source, binding or live input flags and never transforms the result again.
+Malformed syntax/envelopes exit 2; local I/O, materialization and embedded MCP
+failures exit 1. Mechanically extractable `isError` or unsupported `resultType`
+envelopes can still produce artifacts while exiting 1. Exit 0 cannot reconstruct
+the original process's transport, transformation or teardown status.
+
+## Invoke a live tool
 
 The command surface draws pattern inspiration from
 [MCPorter](https://github.com/openclaw/mcporter), the Python
