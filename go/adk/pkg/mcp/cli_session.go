@@ -56,7 +56,11 @@ func (c *cliCommandHeaders) RoundTrip(request *http.Request) (*http.Response, er
 		if err := invocation.Err(); err != nil {
 			return nil, err
 		}
-		headers := c.resolver.resolveHeaders(invocation)
+		headers, err := c.resolver.resolveHeaders(invocation)
+		if err != nil {
+			return nil, err
+		}
+		request = request.Clone(context.WithValue(request.Context(), lifecycleHeadersKey{}, true))
 		propagation.TraceContext{}.Inject(invocation, propagation.HeaderCarrier(headers))
 		for name, values := range headers {
 			request.Header[http.CanonicalHeaderKey(name)] = values

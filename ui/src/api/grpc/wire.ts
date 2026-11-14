@@ -38,6 +38,7 @@ import type { ResourceReference, StructuredObject } from "@/generated/kagent/api
  * The `kagent.api.v1` protobuf package carries custom resources whose
  * Kubernetes API version remains `api.kagent.dev/v1alpha3`.
  */
+// eslint-disable-next-line no-restricted-syntax -- the single place the version is spelled
 export const KAGENT_API_VERSION = "api.kagent.dev/v1alpha3";
 
 /** A missing collection is an empty one — an absent list is not an error. */
@@ -118,8 +119,8 @@ export function isoFrom(timestamp: Timestamp | undefined): string {
  * `FNR`, not `NR`: `NR` keeps counting across files, so every line number after the
  * first schema comes out wrong — which is how this list drifted last time.
  *
- * - `ateapi.proto`      — `ResourceMetadata.version`  (reached by `substrate.actors`)
- * - `ateapi.proto`      — `Worker.metadata.version`    (reached by `substrate.workers`)
+ * - `api/ateapi/v1/ateapi.proto`      — `ResourceMetadata.version`  (reached by `substrate.actors`)
+ * - `api/ateapi/v1/ateapi.proto`      — `Worker.metadata.version`    (reached by `substrate.workers`)
  * - `system.proto`  — `SubstrateActorStatusCount.count`      (`substrate.summary`)
  * - `system.proto`  — `GetSubstrateSummaryResponse.actor_count`         (the same)
  * - `system.proto`  — `GetSubstrateSummaryResponse.worker_count`        (the same)

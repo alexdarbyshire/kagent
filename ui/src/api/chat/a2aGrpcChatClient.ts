@@ -47,6 +47,7 @@
 
 import { create, toJson, type JsonObject } from "@bufbuild/protobuf";
 import { ValueSchema } from "@bufbuild/protobuf/wkt";
+import { Code, ConnectError } from "@connectrpc/connect";
 import {
   A2AService,
   MessageSchema,
@@ -58,7 +59,8 @@ import {
   type Task as A2ATask,
   type TaskStatus,
 } from "@/generated/a2a_pb";
-import { ApiError, fromConnectError, rethrowIfAborted } from "../ApiError";
+import { ErrorInfoSchema } from "@/generated/google/rpc/error_details_pb";
+import { ApiError, fromConnectError, rethrowIfAborted, SEND_NOT_ACCEPTED, TURN_ACTIVE } from "../ApiError";
 import { A2A_METADATA, metadataString } from "./a2aMetadata";
 import {
   HITL_EXTENSION_HEADER,
@@ -68,7 +70,7 @@ import {
   readToolApprovalResponse,
   type PendingRequest,
 } from "./hitl";
-import { mediaTypeOf } from "./attachments";
+import { fileNameFromUrl, isHttpUrl, LinkFile, mediaTypeOf } from "./attachments";
 import { agentInstanceShareToken } from "../shareToken";
 import { interleaveTaskMessages } from "./transcriptOrder";
 import { serviceClient } from "../transport";
@@ -97,6 +99,127 @@ const SHARE_HEADER = "X-Share-Token";
  * which would otherwise spin here with the page stuck on a spinner.
  */
 const HISTORY_PAGE_LIMIT = 50;
+
+/** Consecutive broken streams that came to nothing before a turn is given up. */
+const REATTACH_LIMIT = 3;
+
+/**
+ * How long a stream has to stay open for its break to count as a quiet stream
+ * being cut rather than a failure.
+ *
+ * A proxy closes an idle stream after its timeout, commonly 30 s or more, so a
+ * stream cut that late was working and the turn keeps following its task. One
+ * that breaks sooner with nothing new in it counts towards `REATTACH_LIMIT`.
+ */
+const REATTACH_HEALTHY_MS = 10_000;
+
+/** The wait before the first re-attach after a failure, doubled for each one after. */
+const REATTACH_BACKOFF_MS = 500;
+
+/**
+ * How long a send keeps re-sending a message the gateway proved it did not accept.
+ * The window bounds the retries, not how long an accepted turn may run.
+ */
+const UNACCEPTED_SEND_WINDOW_MS = 30_000;
+
+/** The wait before re-sending when the gateway does not name one. */
+const UNACCEPTED_SEND_RETRY_MS = 100;
+
+/**
+ * The longest wait between re-sends. Each wait doubles from the gateway's, so a
+ * runtime that stays down costs a handful of sends per window rather than hundreds.
+ */
+const UNACCEPTED_SEND_MAX_RETRY_MS = 2_000;
+
+/** `ErrorInfo.domain` of every error the A2A server writes (`a2a.ProtocolDomain`). */
+const A2A_PROTOCOL_DOMAIN = "a2a-protocol.org";
+
+/**
+ * A2A's UNSUPPORTED_OPERATION refusal (gRPC FAILED_PRECONDITION), or undefined.
+ * The gateway answers an input it cannot take this way, before running anything.
+ */
+function a2aRefusal(error: unknown) {
+  if (!(error instanceof ConnectError) || error.code !== Code.FailedPrecondition) return undefined;
+  return error.findDetails(ErrorInfoSchema).find((detail) =>
+    detail.domain === A2A_PROTOCOL_DOMAIN && detail.reason === "UNSUPPORTED_OPERATION");
+}
+
+/**
+ * The wait before re-sending, when `error` is the gateway's proof that it did not
+ * accept the message; otherwise undefined.
+ *
+ * The gateway answers a send that reached a crashed runtime, or a recovery still in
+ * progress, with A2A's UNSUPPORTED_OPERATION (gRPC FAILED_PRECONDITION) and a
+ * `google.rpc.ErrorInfo` whose metadata says `reason: KAGENT_SEND_NOT_ACCEPTED`.
+ * Only that combination is proof: any other refusal, or a broken connection, may
+ * have accepted the input, and sending it again could start a second turn.
+ */
+function unacceptedSendRetryMs(error: unknown): number | undefined {
+  const info = a2aRefusal(error);
+  if (info?.metadata.reason !== SEND_NOT_ACCEPTED) return undefined;
+  const wait = Number.parseInt(info.metadata.retryAfterMs ?? "", 10);
+  return Number.isFinite(wait) && wait >= 0 ? wait : UNACCEPTED_SEND_RETRY_MS;
+}
+
+/** A refused send, tagged with `reason` for the page to offer a revert. */
+function refusedSendError(error: unknown, reason: string, message?: string): ApiError {
+  const failure = fromConnectError(error, "A2AService/SendStreamingMessage");
+  return new ApiError(message ?? failure.message, {
+    kind: failure.kind, status: failure.status, code: failure.code,
+    reason, url: failure.url, cause: error,
+  });
+}
+
+/**
+ * Resolves after `ms`, or early once `wake` fires; rejects with the abort as soon as
+ * `signal` fires.
+ */
+function pause(ms: number, signal: AbortSignal | undefined, wake?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason);
+      return;
+    }
+    if (wake?.aborted) {
+      resolve();
+      return;
+    }
+    const done = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      wake?.removeEventListener("abort", onWake);
+    };
+    const onAbort = () => {
+      done();
+      reject(signal?.reason);
+    };
+    const onWake = () => {
+      done();
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      done();
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+    wake?.addEventListener("abort", onWake, { once: true });
+  });
+}
+
+type StreamFrame = { payload: { case?: string; value?: unknown } };
+
+/**
+ * Whether an error is the connection failing rather than the server answering.
+ *
+ * A proxy closing a quiet stream reaches the browser as a bare `network error` or
+ * a body that ends without its trailer — both `Unknown` — or as an HTTP 502/503/504,
+ * which is `Unavailable`. Anything the controller decided (a refusal, a missing
+ * permission) arrives with its own code and is not retried.
+ */
+function isBrokenTransport(error: unknown): boolean {
+  const { code } = ConnectError.from(error);
+  return code === Code.Unknown || code === Code.Unavailable;
+}
 
 /** Ids for the messages the wire did not name. */
 let counter = 0;
@@ -216,24 +339,6 @@ function toPart(part: A2APart): ChatPart | undefined {
   return undefined;
 }
 
-function isHttpUrl(url: string): boolean {
-  try {
-    const { protocol } = new URL(url);
-    return protocol === "http:" || protocol === "https:";
-  } catch {
-    return false;
-  }
-}
-
-// Last path segment, so a query string or fragment never becomes the name.
-function fileNameFromUrl(url: string): string {
-  try {
-    return decodeURIComponent(new URL(url).pathname.split("/").pop() ?? "") || "file";
-  } catch {
-    return "file";
-  }
-}
-
 /**
  * What a data part represents.
  *
@@ -259,7 +364,7 @@ function dataKindOf(
   return "unknown";
 }
 
-function toParts(parts: readonly A2APart[] | undefined): ChatPart[] {
+function toParts(parts: readonly A2APart[] | undefined, role?: Role): ChatPart[] {
   const result: ChatPart[] = [];
   for (const source of parts ?? []) {
     const part = toPart(source);
@@ -272,7 +377,12 @@ function toParts(parts: readonly A2APart[] | undefined): ChatPart[] {
     }
     result.push(part);
   }
-  return result;
+  // A link the user sent beside its own URL in the text (see LinkFile) gets no chip.
+  if (role !== Role.USER) return result;
+  return result.filter(
+    (part) =>
+      !(part.kind === "file" && part.url && result.some((t) => t.kind === "text" && t.text.includes(part.url!))),
+  );
 }
 
 type ControlFlowResult = "confirmation_required" | "rejected";
@@ -282,8 +392,8 @@ type ControlFlowResult = "confirmation_required" | "rejected";
  *
  * ADK currently reports confirmation as an errored FunctionResponse. Those
  * responses are instructions to the runtime, not failed tool executions. Match
- * only the two complete compatibility strings observed on the wire; a broad
- * substring check could hide a real tool error that merely discusses approval.
+ * only the complete strings observed on the wire; a broad substring check could
+ * hide a real tool error that merely discusses approval.
  */
 function visibleParts(
   parts: readonly ChatPart[],
@@ -331,8 +441,16 @@ function controlFlowResult(part: ChatDataPart): ControlFlowResult | undefined {
   if (confirmation && (!name || confirmation[1] === name)) return "confirmation_required";
   const rejected = /^error tool "([^"]+)" call is rejected$/.exec(error);
   if (rejected && (!name || rejected[1] === name)) return "rejected";
+  if (REJECTED_BY_USER.test(error)) return "rejected";
   return undefined;
 }
+
+/**
+ * What a runtime says when a person rejected the call, and the reason they gave
+ * when they gave one. It names the person rather than the tool, so there is no
+ * tool name in it to correlate.
+ */
+const REJECTED_BY_USER = /^Tool call was rejected by user\.(?: Reason: [\s\S]+)?$/;
 
 /** The prose of a set of parts, for comparing a reply against the artifact repeating it. */
 function textOf(parts: readonly ChatPart[]): string {
@@ -452,11 +570,14 @@ export class A2AGrpcChatClient implements ChatClient {
   }
 
   async *send(input: SendMessageInput): AsyncIterable<ChatEvent> {
-    const { conversation, text, signal } = input;
+    const { conversation, text, signal, stopResending } = input;
     const client = serviceClient(A2AService);
     const fileParts = await Promise.all(
       (input.files ?? []).map(async (file) => ({
-        content: { case: "raw" as const, value: new Uint8Array(await file.arrayBuffer()) },
+        content:
+          file instanceof LinkFile
+            ? { case: "url" as const, value: file.url }
+            : { case: "raw" as const, value: new Uint8Array(await file.arrayBuffer()) },
         filename: file.name,
         mediaType: mediaTypeOf(file),
       })),
@@ -528,19 +649,94 @@ export class A2AGrpcChatClient implements ChatClient {
      */
     const artifacts = new Map<string, ChatPart[]>();
 
-    let stream: AsyncIterable<{ payload: { case?: string; value?: unknown } }>;
+    const options = this.callOptions(conversation, signal);
+    let stream: AsyncIterable<StreamFrame>;
     try {
-      stream = client.sendStreamingMessage(
-        request,
-        this.callOptions(conversation, signal),
-      );
+      stream = client.sendStreamingMessage(request, options);
     } catch (error) {
       rethrowIfAborted(error, signal);
       throw fromConnectError(error, "A2AService/SendStreamingMessage");
     }
 
+    /*
+     * The turn's frames, followed past a broken stream.
+     *
+     * A proxy between the browser and the controller may close a stream that has
+     * been quiet for a while — a model reading a long prompt sends nothing for
+     * minutes. The task keeps running on the server, so once the stream has named
+     * its task, losing the connection is not a failed turn: the task is re-attached
+     * with `SubscribeToTask`, which is read-only and returns the stored task once it
+     * has finished. The message itself is never sent twice.
+     *
+     * A re-attached stream opens with the task as it stands, so that first frame is
+     * not taken as a sign the path works: a path that breaks right after it would
+     * otherwise never run out of attempts. What resets the count is a frame after
+     * it, or a stream that stayed open long enough to have been cut for being quiet.
+     *
+     * Before any frame, a send the gateway proves it did not accept is sent again,
+     * identically, after a wait that doubles up to `UNACCEPTED_SEND_MAX_RETRY_MS`.
+     * With automatic recovery enabled, that is how a crashed runtime recovers: the
+     * send that finds it reverts it, and the same message ID can never be accepted
+     * twice. Once a frame has arrived, the message was accepted and is never re-sent.
+     */
+    let taskId = "";
+    let settled = false;
+    const follow = async function* (): AsyncGenerator<StreamFrame> {
+      const resendUntil = Date.now() + UNACCEPTED_SEND_WINDOW_MS;
+      let resendWait = 0;
+      let received = false;
+      let source = stream;
+      for (let failures = 0; ; ) {
+        const opened = Date.now();
+        let progressed = false;
+        try {
+          for await (const frame of source) {
+            received = true;
+            if (frame.payload.case !== "task") progressed = true;
+            const event = frame.payload.value as
+              | { id?: string; taskId?: string; status?: TaskStatus }
+              | undefined;
+            const id = frame.payload.case === "task" ? event?.id : event?.taskId;
+            if (id) taskId = id;
+            if (event?.status) {
+              settled = !["working", "submitted"].includes(turnState(event.status.state));
+            }
+            yield frame;
+          }
+          return;
+        } catch (error) {
+          const resendAfter = received ? undefined : unacceptedSendRetryMs(error);
+          // A stopped message is never sent again: each refusal proved the last
+          // attempt was not accepted, so ending here leaves nothing running.
+          if (resendAfter !== undefined && !signal?.aborted && !stopResending?.aborted) {
+            resendWait = Math.max(resendAfter, Math.min(resendWait * 2, UNACCEPTED_SEND_MAX_RETRY_MS));
+            if (Date.now() + resendWait > resendUntil) {
+              const recovering = a2aRefusal(error)?.metadata.state === "RECOVERING";
+              throw refusedSendError(error, SEND_NOT_ACCEPTED, recovering
+                ? "The agent's runtime is still recovering from a crash."
+                : "The agent's runtime did not accept the message. It may have crashed.");
+            }
+            await pause(resendWait, signal, stopResending);
+            if (stopResending?.aborted) throw error;
+            source = client.sendStreamingMessage(request, options);
+            continue;
+          }
+          if (!received && !signal?.aborted && a2aRefusal(error)?.metadata.reason === TURN_ACTIVE) {
+            throw refusedSendError(error, TURN_ACTIVE);
+          }
+          if (progressed || Date.now() - opened >= REATTACH_HEALTHY_MS) failures = 0;
+          failures += 1;
+          const reattach = !signal?.aborted && taskId !== "" && !settled
+            && failures <= REATTACH_LIMIT && isBrokenTransport(error);
+          if (!reattach) throw error;
+          await pause(REATTACH_BACKOFF_MS * 2 ** (failures - 1), signal);
+          source = client.subscribeToTask({ tenant: conversation.agent, id: taskId }, options);
+        }
+      }
+    };
+
     try {
-      for await (const frame of stream) {
+      for await (const frame of follow()) {
         const payload = frame.payload;
 
         if (payload.case === "statusUpdate") {
@@ -550,7 +746,7 @@ export class A2AGrpcChatClient implements ChatClient {
           };
           const status = event.status;
           const message = status?.message;
-          const parts = visibleParts(toParts(message?.parts), { hideRejected: true });
+          const parts = visibleParts(toParts(message?.parts, message?.role), { hideRejected: true });
           const state = turnState(status?.state);
           /*
            * The question, when this is the frame that parked the turn.
@@ -688,10 +884,23 @@ export class A2AGrpcChatClient implements ChatClient {
         // A non-streaming agent answers with the whole task instead of updates.
         if (payload.case === "task") {
           const task = payload.value as A2ATask;
+          // An artifact is shown again from every snapshot rather than once: a
+          // later snapshot holds chunks that were sent while the stream was down.
+          const artifactIds = new Set(task.artifacts.map((artifact) => artifact.artifactId));
           for (const message of messagesFromTask(task)) {
-            if (delivered.has(message.id)) continue;
-            delivered.add(message.id);
+            if (!artifactIds.has(message.id)) {
+              if (delivered.has(message.id)) continue;
+              delivered.add(message.id);
+            }
             yield { type: "message", message };
+          }
+          // A re-attached stream opens with this snapshot, and an artifact still
+          // being streamed carries on with `append` chunks. Known here, the next
+          // chunk adds to what the snapshot showed instead of replacing it.
+          for (const artifact of task.artifacts) {
+            if (artifact.artifactId) {
+              artifacts.set(artifact.artifactId, toParts(artifact.parts));
+            }
           }
           yield {
             type: "status",
@@ -704,7 +913,7 @@ export class A2AGrpcChatClient implements ChatClient {
 
         if (payload.case === "message") {
           const message = payload.value as A2AMessage;
-          const parts = visibleParts(toParts(message.parts), { hideRejected: true });
+          const parts = visibleParts(toParts(message.parts, message.role), { hideRejected: true });
           if (parts.length === 0) continue;
           const id = message.messageId || nextId("message");
           if (delivered.has(id)) continue;
@@ -817,7 +1026,7 @@ export function messagesFromTask(task: A2ATask): ChatMessage[] {
               },
             },
           ]
-      : toParts(message.parts);
+      : toParts(message.parts, message.role);
     if (decisions) pendingApproval = undefined;
     if (answer) pendingQuestions.delete(answer.requestId);
     if (parts.length === 0) return;

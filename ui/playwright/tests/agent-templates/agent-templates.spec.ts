@@ -29,6 +29,8 @@ test("agent templates: a template is created, read, edited and deleted", async (
     const row = rowNamed(page, "k8s-agent-7f3a91c");
 
     await expect(row).toContainText("default-model-config");
+    // Two named tools on one server: the column counts tools, not bindings.
+    await expect(row.getByRole("cell").nth(3)).toHaveText("2");
 
     // `note-taker` carries no labels at all. It is a complete, valid template that can
     // never become an agent, and only this column says so.
@@ -68,6 +70,7 @@ test("agent templates: a template is created, read, edited and deleted", async (
   });
 
   await test.step("4. the form says what a template is, and refuses an unusable one", async () => {
+    await page.getByTestId("agents-create").click();
     await page.getByTestId("agents-new-template").click();
     await page.waitForURL(/\/agent-templates\/new(\?|$)/);
 
@@ -87,11 +90,11 @@ test("agent templates: a template is created, read, edited and deleted", async (
       await page.getByTestId("template-form-mcp-remove-0").click();
     });
 
-    await test.step("a namespace with no model configurations says why the list is empty", async () => {
+    await test.step("a namespace can select a visible model from another namespace", async () => {
       await selectOption(page, "template-form-namespace", "default");
-      await expect(page.getByTestId("template-form-model-availability")).toContainText(
-        "No model configurations found in default",
-      );
+      await selectOption(page, "template-form-model", "kagent/default-model-config");
+      await expect(page.getByTestId("template-form-model")).toContainText("kagent/default-model-config");
+      await expect(page.getByTestId("template-form-model-availability")).toHaveCount(0);
       await selectOption(page, "template-form-namespace", "kagent");
       await expect(page.getByTestId("template-form-model-availability")).toHaveCount(0);
     });
@@ -108,7 +111,7 @@ test("agent templates: a template is created, read, edited and deleted", async (
 
   await test.step("5. the template saves without creating an Agent", async () => {
     await page.getByTestId("template-form-name").fill(CREATED);
-    await selectOption(page, "template-form-model", "default-model-config");
+    await selectOption(page, "template-form-model", "kagent/default-model-config");
 
     await expect(page.getByTestId("template-submit")).toBeEnabled();
     await page.getByTestId("template-submit").click();

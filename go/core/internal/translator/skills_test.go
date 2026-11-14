@@ -24,8 +24,7 @@ func TestCompileSkillImageVolumes(t *testing.T) {
 	for _, kind := range []translator.HarnessType{translator.HarnessTypeKagent, translator.HarnessTypeCodex, translator.HarnessTypeClaude, translator.HarnessTypeBYO} {
 		t.Run(string(kind), func(t *testing.T) {
 			harness := &v1alpha3.Harness{ObjectMeta: metav1.ObjectMeta{Name: "runtime", Namespace: "test"}, Spec: v1alpha3.HarnessSpec{
-				Workload: v1alpha3.HarnessWorkload{Image: new(image), Command: []string{"/agent"},
-					Capabilities: &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}, Add: []corev1.Capability{"CHOWN"}}},
+				Workload:  v1alpha3.HarnessWorkload{Image: new(image), Command: []string{"/agent"}},
 				Substrate: v1alpha3.RuntimeSubstratePolicy{WorkerPoolRef: corev1.LocalObjectReference{Name: "default"}, SnapshotPolicy: v1alpha3.RuntimeSnapshotPolicy{Location: "snapshots"}},
 			}}
 			model := modelConfig()
@@ -44,7 +43,7 @@ func TestCompileSkillImageVolumes(t *testing.T) {
 			}
 			secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "model-auth", Namespace: "test"}, Data: map[string][]byte{"api-key": []byte("test")}}
 			template := &v1alpha3.AgentTemplate{ObjectMeta: metav1.ObjectMeta{Name: "skills", Namespace: "test"}, Spec: v1alpha3.AgentTemplateSpec{
-				ModelConfig: &corev1.LocalObjectReference{Name: model.Name}, SystemPrompt: "help",
+				ModelConfig: &v1alpha3.ModelConfigReference{Name: model.Name}, SystemPrompt: "help",
 				Skills:  []v1alpha3.AgentTemplateSkill{{Name: "review", Source: v1alpha3.ArtifactSource{OCI: image, Path: "skills/review"}}},
 				Plugins: []v1alpha3.PluginBundle{{Source: v1alpha3.ArtifactSource{OCI: image, Path: "plugin"}, Skills: []string{"deploy"}}},
 			}}
@@ -77,19 +76,14 @@ func TestCompileSkillImageVolumes(t *testing.T) {
 			require.Equal(t, []string{"deploy"}, resources.Plugins[0].Skills)
 			id, err := result.Digest()
 			require.NoError(t, err)
-			actor, err := substrate.ActorTemplateForRevision(&result.Revision, id)
+			bundle, err := result.BootstrapBundle(id)
+			require.NoError(t, err)
+			actor, err := substrate.ActorTemplateForRevision(&result.Revision, id, bundle)
 			require.NoError(t, err)
 			require.Len(t, actor.Volumes, 4)
 			require.Equal(t, image, actor.Volumes[3].Image.Reference)
 			require.Equal(t, actor.Volumes[3].Name, actor.Containers[0].VolumeMounts[3].Name)
 			require.Equal(t, resources.Skills[0].Source.Directory, actor.Containers[0].VolumeMounts[3].MountPath)
-			require.Equal(t, []string{"ALL"}, actor.Containers[0].GetSecurityContext().GetCapabilities().GetDrop())
-			require.Equal(t, []string{"CHOWN"}, actor.Containers[0].GetSecurityContext().GetCapabilities().GetAdd())
-			withoutCapabilities := result.Revision
-			withoutCapabilities.Capabilities = nil
-			withoutCapabilitiesID, err := withoutCapabilities.Digest()
-			require.NoError(t, err)
-			require.NotEqual(t, id, withoutCapabilitiesID)
 			// Delivery inputs affect revision identity independently of JSON/provenance.
 			changed := result.Revision
 			changed.SkillImages = nil

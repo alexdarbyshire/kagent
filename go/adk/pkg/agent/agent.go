@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"slices"
+	"strings"
 	"time"
 
 	"buf.build/go/protovalidate"
@@ -21,6 +22,7 @@ import (
 	"google.golang.org/adk/v2/tool/preloadmemorytool"
 	"google.golang.org/adk/v2/tool/skilltoolset"
 	"google.golang.org/adk/v2/tool/skilltoolset/skill"
+	"google.golang.org/adk/v2/tool/toolconfirmation"
 	"google.golang.org/genai"
 	"google.golang.org/protobuf/types/known/durationpb"
 
@@ -31,6 +33,7 @@ import (
 	adkoutputschema "github.com/kagent-dev/kagent/go/adk/pkg/outputschema"
 	"github.com/kagent-dev/kagent/go/adk/pkg/sts"
 	"github.com/kagent-dev/kagent/go/adk/pkg/tools"
+	apia2a "github.com/kagent-dev/kagent/go/api/a2a"
 	"github.com/kagent-dev/kagent/go/api/adk"
 	configv1 "github.com/kagent-dev/kagent/go/api/gen/kagent/config/v1"
 	"github.com/kagent-dev/kagent/go/core/pkg/env"
@@ -57,7 +60,7 @@ func CreateGoogleADKAgent(ctx context.Context, config *configv1.ADKConfig, agent
 		return nil, err
 	}
 	runtime := runtimeconfig.ProcessConfig(config)
-	scopes, err := materializeCLI(config.Agent, runtime.GetTokenPropagation().GetEnabled() || stsPlugin != nil, runtime.GetSkillTools().GetDisableBash())
+	scopes, err := materializeCLI(config.Agent, runtime.GetTokenPropagation().GetEnabled() || stsPlugin != nil, runtime.GetBuiltinTools().GetDisableBash())
 	if err != nil {
 		return nil, fmt.Errorf("failed to materialize MCP CLI commands: %w", err)
 	}
@@ -80,13 +83,40 @@ func createGoogleADKAgent(ctx context.Context, agentConfig *configv1.ADKAgentCon
 	var dynamicHeaderProvider mcp.DynamicHeaderProvider
 	var lifecycleProvider mcp.LifecycleAuthorityProvider
 	if stsPlugin != nil {
-		dynamicHeaderProvider = stsPlugin.HeaderProvider
-		lifecycleProvider = stsPlugin.LifecycleAuthority
+		dynamicHeaderProvider = func(ctx context.Context) map[string]string {
+			if scope, ok := ctx.(interface{ SessionID() string }); ok {
+				ctx = models.WithSessionID(ctx, scope.SessionID())
+			}
+			return stsPlugin.HeaderProvider(ctx)
+		}
+		lifecycleProvider = func(ctx context.Context) mcp.LifecycleAuthority {
+			if scope, ok := ctx.(interface{ SessionID() string }); ok {
+				ctx = models.WithSessionID(ctx, scope.SessionID())
+			}
+			authority := stsPlugin.LifecycleAuthority(ctx)
+			if authority == nil {
+				return nil
+			}
+			return authority
+		}
 	}
 	mcpLifecycle := mcp.NewClientLifecycle(ctx, lifecycleProvider)
 	toolsets := mcp.CreateToolsets(ctx, agentConfig.HttpTools, agentConfig.SseTools, agentConfig.StdioTools, propagateToken, dynamicHeaderProvider, mcpLifecycle)
 	skillsDirectory := agentConfig.SkillsDirectory
-	hasSkills := false
+	builtinTools := runtime.GetBuiltinTools()
+	executionConfig := tools.BuiltinToolsConfig{
+		SkillsDirectory: skillsDirectory, BashVenvPath: builtinTools.GetBashVenvPath(),
+		DisableFileSearch: builtinTools.GetDisableFileSearch(), DisableBash: builtinTools.GetDisableBash(),
+		CommandDirectory: scopes.agents[agentConfig],
+	}
+	if executionConfig.CommandDirectory != "" {
+		executionConfig.PrepareEnvironment = mcp.PrepareCLIEnvironment(ctx, adk.CLIBindings(agentConfig), propagateToken, dynamicHeaderProvider, mcpLifecycle)
+	}
+	executionTools, err := tools.NewBuiltinTools(executionConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create built-in tools: %w", err)
+	}
+	extraTools = append(extraTools, executionTools...)
 	if skillsDirectory != "" {
 		skillsSource := skill.NewFileSystemSource(os.DirFS(skillsDirectory))
 		skills, err := skillsSource.ListFrontmatters(ctx)
@@ -94,8 +124,6 @@ func createGoogleADKAgent(ctx context.Context, agentConfig *configv1.ADKAgentCon
 			return nil, fmt.Errorf("failed to load skills: %w", err)
 		}
 		if len(skills) > 0 {
-			hasSkills = true
-
 			skillsToolset, err := skilltoolset.New(ctx, skilltoolset.Config{Source: skillsSource})
 			if err != nil {
 				return nil, fmt.Errorf("failed to create skill toolset: %w", err)
@@ -104,19 +132,6 @@ func createGoogleADKAgent(ctx context.Context, agentConfig *configv1.ADKAgentCon
 			log.InfoContext(ctx, "wired local skills", "skills_directory", skillsDirectory, "skill_count", len(skills))
 		}
 	}
-	commandDirectory := scopes.agents[agentConfig]
-	if hasSkills || commandDirectory != "" {
-		executionConfig := tools.ExecutionConfig{SkillsDirectory: skillsDirectory, CommandDirectory: commandDirectory, FileSearchEnabled: runtime.GetSkillTools().GetFileSearchTools(), DisableBash: runtime.GetSkillTools().GetDisableBash()}
-		if commandDirectory != "" {
-			executionConfig.PrepareEnvironment = mcp.PrepareCLIEnvironment(ctx, adk.CLIBindings(agentConfig), propagateToken, dynamicHeaderProvider, mcpLifecycle)
-		}
-		executionTools, err := tools.NewExecutionTools(executionConfig)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create execution tools: %w", err)
-		}
-		extraTools = append(extraTools, executionTools...)
-	}
-	mcpAppToolNames := mcp.MCPAppToolNamesFromToolsets(toolsets)
 
 	var remoteAgentTools []tool.Tool
 	for _, remoteAgent := range agentConfig.RemoteAgents {
@@ -136,7 +151,7 @@ func createGoogleADKAgent(ctx context.Context, agentConfig *configv1.ADKAgentCon
 		log.InfoContext(ctx, "wired remote A2A agent tool", "name", remoteAgent.Name, "url", remoteAgent.Url)
 	}
 
-	localTools, err := buildAgentTools(agentConfig, remoteAgentTools, extraTools, log)
+	localTools, err := buildAgentTools(agentConfig, remoteAgentTools, extraTools, builtinTools.GetDisableAskUser(), log)
 	if err != nil {
 		return nil, err
 	}
@@ -168,12 +183,11 @@ func createGoogleADKAgent(ctx context.Context, agentConfig *configv1.ADKAgentCon
 	beforeToolCallbacks := []llmagent.BeforeToolCallback{}
 	beforeModelCallbacks := []llmagent.BeforeModelCallback{}
 
-	if len(mcpAppToolNames) > 0 {
-		// For MCP App-capable tools, keep rich tool payloads in chat history for UI rendering,
-		// but compact what is sent back to the model to avoid redundant polling/tool churn.
-		log.InfoContext(ctx, "wiring MCP App model result callback", "tool_count", len(mcpAppToolNames))
-		beforeModelCallbacks = append(beforeModelCallbacks, MakeMCPAppModelResultCallback(mcpAppToolNames))
-	}
+	// Tools are classified before each model request is prepared. Resolve app
+	// names here rather than capturing an empty snapshot during construction.
+	beforeModelCallbacks = append(beforeModelCallbacks, makeMCPAppModelResultCallback(func(ctx agent.Context) map[string]bool {
+		return mcp.MCPAppToolNamesFromToolsets(ctx, toolsets)
+	}))
 	beforeToolCallbacks = append(beforeToolCallbacks, makeBeforeToolCallback(log))
 
 	llmAgentConfig := llmagent.Config{
@@ -183,13 +197,11 @@ func createGoogleADKAgent(ctx context.Context, agentConfig *configv1.ADKAgentCon
 		Model:                 llmModel,
 		GenerateContentConfig: generateContentConfig(agentConfig.Model),
 		IncludeContents:       llmagent.IncludeContentsDefault,
-		// ADK appends invocation-specific toolset tools to this borrowed slice.
-		// Clip capacity so simultaneous callers cannot share its writable tail.
-		Tools:                slices.Clip(localTools),
-		Toolsets:             toolsets,
-		SubAgents:            subAgents,
-		BeforeToolCallbacks:  beforeToolCallbacks,
-		BeforeModelCallbacks: beforeModelCallbacks,
+		Tools:                 slices.Clip(localTools),
+		Toolsets:              toolsets,
+		SubAgents:             subAgents,
+		BeforeToolCallbacks:   beforeToolCallbacks,
+		BeforeModelCallbacks:  beforeModelCallbacks,
 		AfterToolCallbacks: []llmagent.AfterToolCallback{
 			makeAfterToolCallback(log),
 		},
@@ -248,7 +260,7 @@ func usesRawOutputSchema(model *configv1.ADKModelConfig) bool {
 	}
 }
 
-func buildAgentTools(agentConfig *configv1.ADKAgentConfig, remoteAgentTools, extraTools []tool.Tool, log *slog.Logger) ([]tool.Tool, error) {
+func buildAgentTools(agentConfig *configv1.ADKAgentConfig, remoteAgentTools, extraTools []tool.Tool, disableAskUser bool, log *slog.Logger) ([]tool.Tool, error) {
 	var localTools []tool.Tool
 	if agentConfig.Memory != nil {
 		log.Info("memory configuration detected, adding memory tools")
@@ -260,11 +272,13 @@ func buildAgentTools(agentConfig *configv1.ADKAgentConfig, remoteAgentTools, ext
 	localTools = append(localTools, remoteAgentTools...)
 	localTools = append(localTools, extraTools...)
 
-	askUserTool, err := tools.NewAskUserTool()
-	if err != nil {
-		return nil, fmt.Errorf("failed to create ask_user tool: %w", err)
+	if !disableAskUser {
+		askUserTool, err := tools.NewAskUserTool()
+		if err != nil {
+			return nil, fmt.Errorf("failed to create ask_user tool: %w", err)
+		}
+		localTools = append(localTools, askUserTool)
 	}
-	localTools = append(localTools, askUserTool)
 	return localTools, nil
 }
 
@@ -309,17 +323,19 @@ func CreateLLM(ctx context.Context, m *configv1.ADKModelConfig) (adkmodel.LLM, e
 			Temperature:         p.Openai.Temperature,
 			TopP:                p.Openai.TopP,
 			APIFormat:           p.Openai.ApiFormat,
+			StrictOutputSchema:  new(p.Openai.StrictOutputSchema),
 		}
 		return models.NewOpenAIModel(ctx, cfg)
 
 	case *configv1.ADKModelConfig_AzureOpenai:
 		cfg := &models.AzureOpenAIConfig{
-			TransportConfig: transportConfigFromBase(m, nil),
-			Model:           m.Model,
-			Endpoint:        p.AzureOpenai.Endpoint,
-			Deployment:      p.AzureOpenai.Deployment,
-			APIVersion:      p.AzureOpenai.ApiVersion,
-			APIFormat:       p.AzureOpenai.ApiFormat,
+			TransportConfig:    transportConfigFromBase(m, nil),
+			Model:              m.Model,
+			Endpoint:           p.AzureOpenai.Endpoint,
+			Deployment:         p.AzureOpenai.Deployment,
+			APIVersion:         p.AzureOpenai.ApiVersion,
+			APIFormat:          p.AzureOpenai.ApiFormat,
+			StrictOutputSchema: new(p.AzureOpenai.StrictOutputSchema),
 		}
 		return models.NewAzureOpenAIModel(ctx, cfg)
 
@@ -328,20 +344,13 @@ func CreateLLM(ctx context.Context, m *configv1.ADKModelConfig) (adkmodel.LLM, e
 		if apiKey == "" {
 			apiKey = env.GeminiAPIKey.Get()
 		}
-		if apiKey == "" {
-			return nil, fmt.Errorf("gemini model requires GOOGLE_API_KEY or GEMINI_API_KEY environment variable")
-		}
 		modelName := m.Model
 		if modelName == "" {
 			modelName = DefaultGeminiModel
 		}
-		httpClient, err := models.BuildHTTPClient(transportConfigFromBase(m, nil))
-		if err != nil {
-			return nil, fmt.Errorf("failed to build HTTP client for Gemini: %w", err)
-		}
-		return adkgemini.NewModel(ctx, modelName, &genai.ClientConfig{
-			APIKey:     apiKey,
-			HTTPClient: httpClient,
+		return models.NewGeminiModel(ctx, models.GeminiConfig{
+			TransportConfig: transportConfigFromBase(m, nil),
+			Model:           modelName, APIKey: apiKey, BaseURL: p.Gemini.BaseUrl,
 		})
 
 	case *configv1.ADKModelConfig_GeminiVertexAi:
@@ -494,11 +503,12 @@ func CreateLLM(ctx context.Context, m *configv1.ADKModelConfig) (adkmodel.LLM, e
 			return models.NewFoundryAnthropicModel(ctx, cfg, p.Foundry.Endpoint, p.Foundry.Deployment, nil)
 		}
 		cfg := &models.FoundryConfig{
-			TransportConfig: transportConfigFromBase(m, nil),
-			Model:           m.Model,
-			Endpoint:        p.Foundry.Endpoint,
-			Deployment:      p.Foundry.Deployment,
-			APIVersion:      p.Foundry.ApiVersion,
+			TransportConfig:    transportConfigFromBase(m, nil),
+			Model:              m.Model,
+			Endpoint:           p.Foundry.Endpoint,
+			Deployment:         p.Foundry.Deployment,
+			APIVersion:         p.Foundry.ApiVersion,
+			StrictOutputSchema: new(p.Foundry.StrictOutputSchema),
 		}
 		return models.NewFoundryModel(ctx, cfg)
 
@@ -563,7 +573,20 @@ func makeAfterToolCallback(logger *slog.Logger) llmagent.AfterToolCallback {
 	}
 }
 
-// makeOnToolErrorCallback returns an OnToolErrorCallback that logs tool errors.
+// Keys of the function response of a tool call that failed: adk-go's own
+// {"error": text} shape, and the flag kagent's clients read on every runtime.
+const (
+	toolResponseErrorKey   = "error"
+	toolResponseIsErrorKey = "isError"
+)
+
+// rejectedToolMessage is what the model is told about a call a person rejected.
+// The Python runtime says the same (kagent/adk/_approval.py), so a rejection
+// reads alike whichever runtime the agent runs on.
+const rejectedToolMessage = "Tool call was rejected by user."
+
+// makeOnToolErrorCallback returns an OnToolErrorCallback that logs tool errors
+// and marks the function response of a failed call with isError.
 func makeOnToolErrorCallback(logger *slog.Logger) llmagent.OnToolErrorCallback {
 	return func(ctx agent.Context, t tool.Tool, args map[string]any, err error) (map[string]any, error) {
 		logger.ErrorContext(ctx, "tool execution failed", "error", err,
@@ -572,8 +595,54 @@ func makeOnToolErrorCallback(logger *slog.Logger) llmagent.OnToolErrorCallback {
 			"session_id", ctx.SessionID(),
 			"invocation_id", ctx.InvocationID(),
 		)
-		return nil, nil
+		return toolErrorResponse(ctx.ToolConfirmation(), err), nil
 	}
+}
+
+// toolErrorResponse is the function response for a tool call that failed: the
+// {"error": text} adk-go builds on its own, plus isError, the flag the harness
+// runtimes set beside a failed result (harness/runtime/a2a) and clients read to
+// show a step as failed. adk-go's MCP toolset collapses a CallToolResult with
+// IsError into a Go error before it reaches the flow, so this callback is the
+// one place that still knows the call failed. A nil map hands the error back to
+// adk-go's default handling.
+func toolErrorResponse(confirmation *toolconfirmation.ToolConfirmation, err error) map[string]any {
+	switch {
+	case err == nil || errors.Is(err, tool.ErrConfirmationRequired):
+		// A confirmation request travels as an error too, but it is a pause,
+		// not a failure: it keeps the plain shape, which clients tell apart by
+		// its text.
+		return nil
+	case errors.Is(err, tool.ErrConfirmationRejected):
+		// The call did not run because a person said no. adk-go reports that as
+		// a bare sentinel naming the tool; the model hears the person instead.
+		return toolFailure(rejectionMessage(confirmation))
+	default:
+		return toolFailure(err.Error())
+	}
+}
+
+// toolFailure is the function response of a call that produced no result, under
+// the message the model reads.
+func toolFailure(message string) map[string]any {
+	return map[string]any{toolResponseErrorKey: message, toolResponseIsErrorKey: true}
+}
+
+// rejectionMessage names the reason a person gave for rejecting a call when the
+// confirmation carries one, so the model can answer the question behind it
+// rather than only learning that it was refused. A confirmation that stands for
+// a child agent's decisions carries that state instead, and falls back to the
+// bare sentence.
+func rejectionMessage(confirmation *toolconfirmation.ToolConfirmation) string {
+	var payload map[string]any
+	if confirmation != nil {
+		payload, _ = confirmation.Payload.(map[string]any)
+	}
+	reason, _ := payload[apia2a.ToolConfirmationRejectionReasonKey].(string)
+	if reason = strings.TrimSpace(reason); reason == "" {
+		return rejectedToolMessage
+	}
+	return rejectedToolMessage + " Reason: " + reason
 }
 
 // mapKeys returns the top-level keys of a map for logging without exposing values.

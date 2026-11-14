@@ -22,11 +22,15 @@ import (
 var modelConfigGVK = v1alpha3.GroupVersion.WithKind("ModelConfig")
 
 // modelConfigResource names ModelConfig in authorization decisions.
-const modelConfigResource = "ModelConfig"
+const (
+	modelConfigResource         = "ModelConfig"
+	modelProviderConfigResource = "ModelProviderConfig"
+)
 
 type Service struct {
-	kubeClient             client.Client
+	kubeClient             client.Client //nolint:forbidigo // TODO(#3235): migrate to apiclient.Client
 	modelConfigs           *kubecrud.Service[*v1alpha3.ModelConfig, *v1alpha3.ModelConfigList]
+	providerConfigs        *kubecrud.Service[*v1alpha3.ModelProviderConfig, *v1alpha3.ModelProviderConfigList]
 	defaultNamespace       string
 	providerModelRefresher ProviderModelRefresher
 }
@@ -55,10 +59,11 @@ type DeleteRequest struct {
 	Ref types.NamespacedName
 }
 
-func NewService(kubeClient client.Client, authorizer auth.CollectionAuthorizer, defaultNamespace string, options ...ServiceOption) *Service {
+func NewService(kubeClient client.Client, authorizer auth.CollectionAuthorizer, defaultNamespace string, options ...ServiceOption) *Service { //nolint:forbidigo // TODO(#3235): migrate to apiclient.Client
 	service := &Service{
 		kubeClient:       kubeClient,
 		modelConfigs:     kubecrud.NewService(kubeClient, authorizer, &v1alpha3.ModelConfig{}, &v1alpha3.ModelConfigList{}, modelConfigResource),
+		providerConfigs:  kubecrud.NewService(kubeClient, authorizer, &v1alpha3.ModelProviderConfig{}, &v1alpha3.ModelProviderConfigList{}, modelProviderConfigResource),
 		defaultNamespace: defaultNamespace,
 	}
 	for _, option := range options {

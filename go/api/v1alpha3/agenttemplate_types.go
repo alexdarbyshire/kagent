@@ -23,6 +23,12 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
+// PromptLibraryLabel marks a same-namespace ConfigMap as a prompt library
+// managed through the PromptTemplate API when set to "true". Any other value,
+// or no label, leaves the ConfigMap outside the API. Prompt template data
+// sources may include any same-namespace ConfigMap, labeled or not.
+const PromptLibraryLabel = "kagent.dev/prompt-library"
+
 // AgentTemplatePromptTemplateSpec enables Go template rendering and ConfigMap includes.
 type AgentTemplatePromptTemplateSpec struct {
 	// DataSources are same-namespace ConfigMaps available to include("source/key").
@@ -44,12 +50,11 @@ type AgentTemplatePromptSource struct {
 	Alias string `json:"alias,omitempty"`
 }
 
-// MCPToolBinding binds tools from a same-namespace MCP server.
+// MCPToolBinding binds tools from an authorized MCP server.
 type MCPToolBinding struct {
-	// +kubebuilder:validation:XValidation:rule="self.kind == 'RemoteMCPServer'",message="kind must be RemoteMCPServer"
-	// +kubebuilder:validation:XValidation:rule="!has(self.apiGroup)",message="apiGroup must be omitted"
+	// Server is the MCP server that provides the tools.
 	// +required
-	Server corev1.TypedLocalObjectReference `json:"server"`
+	Server MCPServerReference `json:"server"`
 	// Tools optionally limits which server tools are exposed. An omitted or empty
 	// list exposes every tool. Harnesses that cannot enforce a partial selection
 	// may expose the whole server and report a warning.
@@ -175,11 +180,11 @@ type PluginBundle struct {
 // AgentTemplateSpec defines portable agent behavior.
 // +kubebuilder:validation:AtMostOneOf=systemPrompt;systemPromptFrom
 // +kubebuilder:validation:AtMostOneOf=outputSchema;outputSchemaFrom
+// +kubebuilder:validation:XValidation:rule="!has(self.outputSchemaStrict) || !self.outputSchemaStrict || has(self.outputSchema) || has(self.outputSchemaFrom)",message="outputSchemaStrict requires outputSchema or outputSchemaFrom"
 type AgentTemplateSpec struct {
 	// ModelConfig is required by managed harnesses and optional for BYO harnesses.
-	// +kubebuilder:validation:XValidation:rule="has(self.name) && self.name != ''",message="name must not be empty"
 	// +optional
-	ModelConfig *corev1.LocalObjectReference `json:"modelConfig,omitempty"`
+	ModelConfig *ModelConfigReference `json:"modelConfig,omitempty"`
 	// +optional
 	Description string `json:"description,omitempty"`
 	// +optional
@@ -197,6 +202,11 @@ type AgentTemplateSpec struct {
 	// same-namespace ConfigMap key.
 	// +optional
 	OutputSchemaFrom *ConfigMapKeyReference `json:"outputSchemaFrom,omitempty"`
+	// OutputSchemaStrict tells OpenAI, Azure OpenAI, and Foundry (openai format)
+	// to limit generation to the output schema. kagent then checks the schema
+	// against OpenAI's strict mode rules on every provider.
+	// +optional
+	OutputSchemaStrict bool `json:"outputSchemaStrict,omitempty"`
 	// +optional
 	PromptTemplate *AgentTemplatePromptTemplateSpec `json:"promptTemplate,omitempty"`
 	// +kubebuilder:validation:MaxItems=50

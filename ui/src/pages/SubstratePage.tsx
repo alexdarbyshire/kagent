@@ -1,3 +1,4 @@
+import { ReadError } from "@/components/common/ReadError";
 import {
   useCallback,
   useEffect,
@@ -234,17 +235,18 @@ const atAGlance = (count: number) => compactNumber.format(count).replace("K", "k
  * today's sample: a reader learns that `Crashed` is a thing that happens by seeing it at
  * zero, not by waiting for one.
  *
+ * The summary groups paused actors under Suspended; only individual actor snapshots
+ * distinguish a node-local pause from a durable suspension.
+ *
  * States absent from this list are added to the legend when reported by Substrate.
  */
 const ACTOR_STATES = [
   "Crashed",
   "Deleting",
-  "Pausing",
   "Resuming",
+  "Reverting",
   "Running",
-  "Snapshotting",
   "Suspending",
-  "Paused",
   "Suspended",
   "Unknown",
 ];
@@ -691,25 +693,74 @@ function SectionSearch({
 
 const PAGE_SIZE = 25;
 
-function PageAge({ computedAt }: { computedAt?: string }) {
+/**
+ * When the list was read, as a clock time rather than a running age: an age that ticks
+ * twice a second pulls the eye off the rows while saying nothing new.
+ *
+ * While polling, a list with no new read for `STALLED_AFTER_TICKS` intervals adds how
+ * long it has gone without one, in the warning colour. That is the stall the old age
+ * showed, now shown only when it is happening.
+ */
+function PageAge({ computedAt, pollMs }: { computedAt?: string; pollMs?: number }) {
   const theme = useTheme();
-  const age = useDataAge(computedAt);
-  return <Text css={{ color: theme.color.textMuted, fontSize: 12 }}>{age}</Text>;
+  const stalledMs = useStalledFor(computedAt, pollMs);
+  const at = readAt(computedAt);
+  if (stalledMs === undefined) {
+    return <Text css={{ color: theme.color.textMuted, fontSize: 12 }}>{at}</Text>;
+  }
+  return (
+    <Text css={{ color: theme.color.warning, fontSize: 12 }}>
+      {`${at}, ${elapsed(stalledMs)} ago`}
+    </Text>
+  );
 }
 
-function useDataAge(computedAt: string | undefined): string {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const timer = window.setInterval(() => setNow(Date.now()), 500);
-    return () => window.clearInterval(timer);
-  }, []);
+const STALLED_AFTER_TICKS = 3;
+// A floor, so a half-second interval does not call one slow read a stall.
+const STALLED_FLOOR_MS = 5_000;
 
+/**
+ * How long a polled list has gone without a new read, once that is a stall.
+ *
+ * Measured on the browser's clock from when `computedAt` last changed, not from
+ * `computedAt` itself, so a skewed server clock cannot raise it.
+ */
+function useStalledFor(computedAt: string | undefined, pollMs: number | undefined) {
+  const [stall, setStall] = useState<{ key?: string; ms: number }>();
+
+  useEffect(() => {
+    if (pollMs === undefined) return;
+    const sinceMs = Date.now();
+    const limitMs = Math.max(STALLED_AFTER_TICKS * pollMs, STALLED_FLOOR_MS);
+    const timer = window.setInterval(() => {
+      const ms = Date.now() - sinceMs;
+      setStall(ms >= limitMs ? { key: computedAt, ms } : undefined);
+    }, 1_000);
+    return () => window.clearInterval(timer);
+  }, [computedAt, pollMs]);
+
+  // A stall belongs to the read it was measured against; a new read clears it at once.
+  return pollMs !== undefined && stall !== undefined && stall.key === computedAt
+    ? stall.ms
+    : undefined;
+}
+
+function readAt(computedAt: string | undefined): string {
   if (!computedAt) return "";
-  const at = new Date(computedAt).getTime();
-  if (Number.isNaN(at)) return "";
-  const seconds = Math.max(0, (now - at) / 1000);
-  if (seconds < 1) return "read just now";
-  return `read ${seconds.toFixed(1)}s ago`;
+  const at = new Date(computedAt);
+  if (Number.isNaN(at.getTime())) return "";
+  return `Read at ${at.toLocaleTimeString([], {
+    hour: "numeric",
+    minute: "2-digit",
+    second: "2-digit",
+  })}`;
+}
+
+/** `12s`, `3m 05s`. */
+function elapsed(ms: number): string {
+  const whole = Math.floor(ms / 1_000);
+  if (whole < 60) return `${whole}s`;
+  return `${Math.floor(whole / 60)}m ${String(whole % 60).padStart(2, "0")}s`;
 }
 
 function PageWarning({ message, testId }: { message: string; testId: string }) {
@@ -887,7 +938,6 @@ export function SubstratePage() {
           template.name,
           template.goldenTag,
           template.phase,
-          template.sandboxClass,
           template.workerSelector,
         ]
           .filter(Boolean)
@@ -994,13 +1044,6 @@ export function SubstratePage() {
         render: (_, template) => <StatusChip label={template.phase ?? ""} />,
       },
       {
-        title: "Sandbox class",
-        key: "sandboxClass",
-        width: 140,
-        sorter: { compare: byText((t) => t.sandboxClass ?? ""), multiple: 3 },
-        render: (_, template) => template.sandboxClass ?? "—",
-      },
-      {
         title: "Worker selector",
         key: "workerSelector",
         sorter: { compare: byText((t) => t.workerSelector ?? ""), multiple: 2 },
@@ -1096,7 +1139,7 @@ export function SubstratePage() {
   return (
     <PageFrame
       title="Substrate"
-      description="Kubernetes worker pools, plus actor templates, live actors, and worker assignments from Substrate."
+      description="Visible worker pools, actor templates, actors, and workers. Counts include only resources you can view."
       actions={
         <Space size={8}>
           <Tooltip
@@ -1213,7 +1256,7 @@ export function SubstratePage() {
             key={atespace}
             defaultValue={atespace}
             aria-label="ATE atespace"
-            placeholder="All atespaces"
+            placeholder="All watched atespaces"
             maxLength={63}
             allowClear
             css={{ width: 240 }}
@@ -1227,32 +1270,23 @@ export function SubstratePage() {
         </Space>
 
         {namespaces.error ? (
-          <Alert
-            type="error"
-            showIcon
+          <ReadError
+            resource="the namespace list"
+            error={namespaces.error}
+            testId="substrate-namespaces-error"
+            onRetry={namespaces.refresh}
             title="Could not load the list of namespaces"
             description={`${namespaces.error.message} You can still name a namespace in this page's address.`}
-            data-testid="substrate-namespaces-error"
-            action={
-              <Button size="small" onClick={() => void namespaces.refresh()}>
-                Try again
-              </Button>
-            }
           />
         ) : null}
 
         {summary.error ? (
-          <Alert
-            type="error"
-            showIcon
+          <ReadError
+            resource="Substrate inventory"
+            error={summary.error}
+            testId="substrate-inventory-error"
+            onRetry={summary.refresh}
             title="Substrate inventory could not be read"
-            description={summary.error.message}
-            data-testid="substrate-inventory-error"
-            action={
-              <Button size="small" onClick={() => void summary.refresh()}>
-                Try again
-              </Button>
-            }
           />
         ) : inventory?.ateApiError ? (
           /* A warning beside the data rather than an error instead of it. The read
@@ -1263,7 +1297,7 @@ export function SubstratePage() {
             type="warning"
             showIcon
             title="Runtime actor state is incomplete"
-            description={`Worker pools come from Kubernetes and are complete. Everything else on this page — the actor templates as well as the actors and workers below — comes from ate-api, which answered with an error, so those may be short: ${inventory.ateApiError}`}
+            description={`Visible worker pools come from Kubernetes. Substrate returned an error, so visible actor templates, actors, and workers may be incomplete: ${inventory.ateApiError}`}
             data-testid="substrate-partial"
           />
         ) : null}
@@ -1319,12 +1353,12 @@ export function SubstratePage() {
             hint={unread}
           />
           <StatTile
-            label="Scope"
+            label="Requested filters"
             testId="substrate-stat-scope"
             // Not read from the response — it is what this page asked for, which is
             // known even when the read failed, and is the thing that explains an empty
             // table.
-            value={!namespace && !atespace ? "all" : `K8s: ${namespace || "all"}; ATE: ${atespace || "all"}`}
+            value={!namespace && !atespace ? "none" : `K8s: ${namespace || "any"}; ATE: ${atespace || "any"}`}
           />
         </div>
 
@@ -1358,8 +1392,8 @@ export function SubstratePage() {
             size="small"
             locale={{
               emptyText: poolQuery.trim()
-                ? "No worker pools match your search."
-                : "No worker pools in this scope. Create one in the cluster, or install one with the Helm chart.",
+                ? "No visible worker pools match your search."
+                : "No worker pools visible in this scope.",
             }}
           />
         </Card>
@@ -1394,8 +1428,8 @@ export function SubstratePage() {
             size="small"
             locale={{
               emptyText: templateQuery.trim()
-                ? "No actor templates match your search."
-                : "No actor templates yet. One appears when you create a harness and an agent template.",
+                ? "No visible actor templates match your search."
+                : "No actor templates visible in this scope.",
             }}
           />
         </Card>
@@ -1411,17 +1445,12 @@ export function SubstratePage() {
           data-testid="substrate-actors-card"
         >
           {actors.error ? (
-            <Alert
-              type="error"
-              showIcon
+            <ReadError
+              resource="actors"
+              error={actors.error}
+              testId="substrate-actors-error"
+              onRetry={actors.refresh}
               title="Actors could not be read"
-              description={actors.error.message}
-              data-testid="substrate-actors-error"
-              action={
-                <Button size="small" onClick={() => void actors.refresh()}>
-                  Try again
-                </Button>
-              }
             />
           ) : actors.data?.ateApiError ? (
             <PageWarning
@@ -1435,9 +1464,9 @@ export function SubstratePage() {
             title="Actor status"
             vocabulary={ACTOR_STATES}
             noun="Actors"
-            unread={Boolean(summary.error)}
+            unread={Boolean(summary.error || actors.error)}
             counts={inventory?.actorStatusCounts ?? []}
-            emptyText="No actors in this scope."
+            emptyText="No actors visible in this scope."
           />
 
           {/* Summary counts cover every worker: more running actors than busy workers means sharing. */}
@@ -1472,7 +1501,7 @@ export function SubstratePage() {
                 ? " "
                 : actors.data?.ateApiError
                   ? "This read could not reach ate-api, so there may be actors it did not see."
-                  : "No actors on this page.",
+                  : "No actors visible in this scope.",
             }}
           />
 
@@ -1491,16 +1520,19 @@ export function SubstratePage() {
               "& > [data-testid$='-pages']": { marginTop: 0 },
             }}
           >
-            <PageAge computedAt={actors.data?.computedAt} />
-
-            <PageControls
-              testId="substrate-actors-pages"
-              page={actorPage}
-              hasNext={Boolean(actors.data?.nextPageToken)}
-              onNext={() => actorPage.next(actors.data?.nextPageToken ?? "")}
-              onBack={actorPage.back}
-              isLoading={actors.isLoading}
-            />
+            {!actors.error && (
+              <>
+                <PageAge computedAt={actors.data?.computedAt} pollMs={isTicking ? pollMs : undefined} />
+                <PageControls
+                  testId="substrate-actors-pages"
+                  page={actorPage}
+                  hasNext={Boolean(actors.data?.nextPageToken)}
+                  onNext={() => actorPage.next(actors.data?.nextPageToken ?? "")}
+                  onBack={actorPage.back}
+                  isLoading={actors.isLoading}
+                />
+              </>
+            )}
           </div>
         </Card>
 
@@ -1515,17 +1547,12 @@ export function SubstratePage() {
           data-testid="substrate-workers-card"
         >
           {workers.error ? (
-            <Alert
-              type="error"
-              showIcon
+            <ReadError
+              resource="workers"
+              error={workers.error}
+              testId="substrate-workers-error"
+              onRetry={workers.refresh}
               title="Workers could not be read"
-              description={workers.error.message}
-              data-testid="substrate-workers-error"
-              action={
-                <Button size="small" onClick={() => void workers.refresh()}>
-                  Try again
-                </Button>
-              }
             />
           ) : workers.data?.ateApiError ? (
             <PageWarning
@@ -1550,7 +1577,7 @@ export function SubstratePage() {
                 ? " "
                 : workers.data?.ateApiError
                   ? "This read could not reach ate-api, so there may be workers it did not see."
-                  : "No worker assignments in this namespace scope on this page.",
+                  : "No workers visible in this scope.",
             }}
           />
 
@@ -1569,16 +1596,19 @@ export function SubstratePage() {
               "& > [data-testid$='-pages']": { marginTop: 0 },
             }}
           >
-            <PageAge computedAt={workers.data?.computedAt} />
-
-            <PageControls
-              testId="substrate-workers-pages"
-              page={workerPage}
-              hasNext={Boolean(workers.data?.nextPageToken)}
-              onNext={() => workerPage.next(workers.data?.nextPageToken ?? "")}
-              onBack={workerPage.back}
-              isLoading={workers.isLoading}
-            />
+            {!workers.error && (
+              <>
+                <PageAge computedAt={workers.data?.computedAt} pollMs={isTicking ? pollMs : undefined} />
+                <PageControls
+                  testId="substrate-workers-pages"
+                  page={workerPage}
+                  hasNext={Boolean(workers.data?.nextPageToken)}
+                  onNext={() => workerPage.next(workers.data?.nextPageToken ?? "")}
+                  onBack={workerPage.back}
+                  isLoading={workers.isLoading}
+                />
+              </>
+            )}
           </div>
         </Card>
       </Space>

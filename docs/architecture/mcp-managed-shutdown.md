@@ -5,6 +5,12 @@ Native Google ADK toolsets and integrated MCP commands use a host-lifetime
 its lifecycle authority provider into both presentations. Standalone commands
 still close their SDK session after each command.
 
+The executable installs `mcp.WithClientLifecycleShutdown` before constructing
+the root and Shared agents. Runtime cancellation stops admission and joins all
+registered owners concurrently under one shutdown deadline. The executable waits
+for authenticated termination attempts and their outcome reports before returning.
+Standalone lifecycle consumers retain cancellation-triggered cleanup.
+
 The SDK owns initialization, protocol negotiation, session IDs, framing, and
 termination requests. Managed transports return its original connection, which
 preserves its private negotiated-version callbacks. Native tool conversion,
@@ -29,7 +35,9 @@ expiry or idle eviction, or revive custody after eviction/replacement. Propagate
 mode uses the same existing cache. Context-only forwarded credentials do not grant
 lifecycle authority. Configured static Authorization retains its precedence over
 provider credentials; current invocation propagation, allowed headers, dynamic
-provider, and static headers retain their existing order.
+provider, and static headers retain their existing order. Caller-token passthrough
+overrides Authorization with the current caller token and cannot authorize
+detached lifecycle traffic; those connections do not open a standalone stream.
 
 ## Shutdown Evidence
 

@@ -200,7 +200,7 @@ func openCLISession(ctx context.Context, binding cliBinding, headers *cliCommand
 	}
 	lifecycle := &cliHTTPTransport{base: invocation, endpoint: endpoint, legacySSE: binding.SSE != nil}
 	httpClient.Transport = lifecycle
-	resolver := &headerRoundTripper{headers: params.Headers, allowedHeaders: params.AllowedHeaders}
+	resolver := &headerRoundTripper{headers: params.Headers, allowedHeaders: params.AllowedHeaders, tokenPassthrough: params.TokenPassthrough}
 	var provider LifecycleAuthorityProvider
 	if headers != nil {
 		resolver = headers.resolver
@@ -215,6 +215,17 @@ func openCLISession(ctx context.Context, binding cliBinding, headers *cliCommand
 	httpClient.Transport = managed
 	remoteSession.managed = managed
 	client := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "kagent-mcp-cli", Version: "1"}, &mcpsdk.ClientOptions{Capabilities: &mcpsdk.ClientCapabilities{}, MultiRoundTrip: &mcpsdk.MultiRoundTripOptions{Disabled: true}})
+	// Each command validates the current wire schema, preserving exact JSON
+	// numbers. SDK catalog cache hits would bypass that per-command capture.
+	client.AddSendingMiddleware(func(next mcpsdk.MethodHandler) mcpsdk.MethodHandler {
+		return func(ctx context.Context, method string, request mcpsdk.Request) (mcpsdk.Result, error) {
+			result, err := next(ctx, method, request)
+			if catalog, ok := result.(*mcpsdk.ListToolsResult); ok && err == nil {
+				catalog.TTLMs = 0
+			}
+			return result, err
+		}
+	})
 	if headers != nil {
 		transport = &registeredTransport{inner: transport, owner: headers.lifecycle, managed: managed, pool: pool, cancel: cancel}
 	}
@@ -328,10 +339,10 @@ func cliTimeout(params mcpServerParams) (time.Duration, error) {
 func cliConnection(binding cliBinding) (mcpServerParams, []string, bool) {
 	if binding.SSE != nil {
 		p := binding.SSE.Params
-		return mcpServerParams{URL: p.Url, ServerType: "sse", Headers: p.Headers, Timeout: cliDuration(p.Timeout), SseReadTimeout: cliDuration(p.SseReadTimeout), TLSInsecureSkipVerify: p.TLSInsecureSkipVerify, TLSCACertPath: p.TLSCACertPath, TLSDisableSystemCAs: p.TLSDisableSystemCAs}, binding.SSE.Tools, binding.SSE.RequireApproval
+		return mcpServerParams{URL: p.Url, ServerType: "sse", TokenPassthrough: binding.SSE.TokenPassthrough, Headers: p.Headers, Timeout: cliDuration(p.Timeout), SseReadTimeout: cliDuration(p.SseReadTimeout), TLSInsecureSkipVerify: p.TLSInsecureSkipVerify, TLSCACertPath: p.TLSCACertPath, TLSDisableSystemCAs: p.TLSDisableSystemCAs}, binding.SSE.Tools, binding.SSE.RequireApproval
 	}
 	p := binding.HTTP.Params
-	return mcpServerParams{URL: p.Url, ServerType: "http", Headers: p.Headers, Timeout: cliDuration(p.Timeout), SseReadTimeout: cliDuration(p.SseReadTimeout), TLSInsecureSkipVerify: p.TLSInsecureSkipVerify, TLSCACertPath: p.TLSCACertPath, TLSDisableSystemCAs: p.TLSDisableSystemCAs}, binding.HTTP.Tools, binding.HTTP.RequireApproval
+	return mcpServerParams{URL: p.Url, ServerType: "http", TokenPassthrough: binding.HTTP.TokenPassthrough, Headers: p.Headers, Timeout: cliDuration(p.Timeout), SseReadTimeout: cliDuration(p.SseReadTimeout), TLSInsecureSkipVerify: p.TLSInsecureSkipVerify, TLSCACertPath: p.TLSCACertPath, TLSDisableSystemCAs: p.TLSDisableSystemCAs}, binding.HTTP.Tools, binding.HTTP.RequireApproval
 }
 
 // Token decoding rejects duplicate keys at every depth and retains JSON numbers.

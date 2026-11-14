@@ -70,7 +70,7 @@ KIND_KUBECONFIG ?= /tmp/kind-config
 # registry container, and templates reconcile at the minimum interval.
 KIND_SUBSTRATE_HELM_ARGS = --set atelet.extraArgs[0]=--localhost-registry-replacement=kind-registry:5000 --set ateApi.extraArgs[0]=--template-resync-interval=250ms
 # A file only releases whose `kagent install` deploys the database contain.
-CLI_DATABASE_SENTINEL = go/core/cli/internal/commands/bundled_postgres.yaml
+CLI_DATABASE_SENTINEL = go/core/pkg/install/bundled_postgres.yaml
 KAGENT_POSTGRES_OWNER_SECRET ?= kagent-postgres-owner
 KAGENT_POSTGRES_READWRITE_SECRET ?= kagent-postgres-readwrite
 
@@ -101,15 +101,18 @@ export GOTOOLCHAIN=go$(TOOLS_GO_VERSION)
 SUBSTRATE_VERSION ?= $(shell $(AWK) '/github\.com\/kagent-dev\/substrate/ { print substr($$5, 2) }' go/go.mod)
 
 # Version information for the build
-LDFLAGS := -X github.com/$(DOCKER_REPO)/go/core/internal/version.Version=$(VERSION) \
-           -X github.com/$(DOCKER_REPO)/go/core/internal/version.GitCommit=$(GIT_COMMIT) \
-           -X github.com/$(DOCKER_REPO)/go/core/internal/version.BuildDate=$(BUILD_DATE) \
-           -X github.com/$(DOCKER_REPO)/go/core/internal/version.SubstrateVersion=$(SUBSTRATE_VERSION)
+LDFLAGS := -X github.com/kagent-dev/kagent/go/core/internal/version.Version=$(VERSION) \
+           -X github.com/kagent-dev/kagent/go/core/internal/version.GitCommit=$(GIT_COMMIT) \
+           -X github.com/kagent-dev/kagent/go/core/internal/version.BuildDate=$(BUILD_DATE) \
+           -X github.com/kagent-dev/kagent/go/core/internal/version.SubstrateVersion=$(SUBSTRATE_VERSION)
 
 #tools versions
 TOOLS_UV_VERSION ?= 0.10.4
 TOOLS_NODE_VERSION ?= 24
 TOOLS_PYTHON_VERSION ?= 3.13
+# Alpine release for the runtime stage of every Go image (go/Dockerfile, the
+# Claude and Codex harnesses, and the sandbox guest).
+ALPINE_VERSION ?= 3.24
 BUF_VERSION ?= v1.72.0
 BUF := go run github.com/bufbuild/buf/cmd/buf@$(BUF_VERSION)
 
@@ -123,6 +126,7 @@ TOOLS_IMAGE_BUILD_ARGS += --build-arg TOOLS_GO_VERSION=$(TOOLS_GO_VERSION)
 TOOLS_IMAGE_BUILD_ARGS += --build-arg TOOLS_UV_VERSION=$(TOOLS_UV_VERSION)
 TOOLS_IMAGE_BUILD_ARGS += --build-arg TOOLS_PYTHON_VERSION=$(TOOLS_PYTHON_VERSION)
 TOOLS_IMAGE_BUILD_ARGS += --build-arg TOOLS_NODE_VERSION=$(TOOLS_NODE_VERSION)
+TOOLS_IMAGE_BUILD_ARGS += --build-arg ALPINE_VERSION=$(ALPINE_VERSION)
 
 
 ##@ General
@@ -148,16 +152,13 @@ print-tools-versions: ## Print tools versions
 	@echo "Tools Go     : $(TOOLS_GO_VERSION)"
 	@echo "Tools UV     : $(TOOLS_UV_VERSION)"
 	@echo "Tools Node   : $(TOOLS_NODE_VERSION)"
+	@echo "Tools Python : $(TOOLS_PYTHON_VERSION)"
+	@echo "Tools Buf    : $(BUF_VERSION)"
 	@echo "Tools Weaver : $(WEAVER_VERSION)"
 	@echo "Tools Istio  : $(TOOLS_ISTIO_VERSION)"
 	@echo "Tools Argo CD: $(TOOLS_ARGO_CD_VERSION)"
 
 ##@ Protobuf
-
-# Builds regenerate protobuf code so local proto edits take effect. CI builds use
-# the committed output instead: proto-check verifies it, and every regeneration
-# spends Buf Schema Registry remote-plugin requests, which are rate limited.
-BUILD_PROTO_GENERATE := $(if $(filter true,$(CI)),,proto-generate)
 
 .PHONY: proto-generate
 proto-generate: ## Generate Go, TypeScript, and Python protobuf clients and servers
@@ -170,14 +171,10 @@ proto-lint: ## Lint repository-owned protobuf schemas
 	cd proto && $(BUF) lint
 
 .PHONY: proto-breaking
-proto-breaking: ## Check protobuf compatibility against the target branch (default: main)
-	@if git cat-file -e "$(PROTO_BREAKING_BRANCH):proto/buf.yaml" 2>/dev/null; then \
-		$(BUF) breaking proto --against ".git#branch=$(PROTO_BREAKING_BRANCH),subdir=proto"; \
-	else \
-		echo "No protobuf module on $(PROTO_BREAKING_BRANCH); skipping first-release breaking check"; \
-	fi
+proto-breaking: ## Check protobuf compatibility against the target Git ref (default: origin/main)
+	$(BUF) breaking proto --against ".git#ref=$(PROTO_BREAKING_BRANCH),subdir=proto"
 
-PROTO_BREAKING_BRANCH ?= main
+PROTO_BREAKING_BRANCH ?= origin/main
 PROTO_GENERATED_PATHS := go/api/gen ui/src/generated python/packages/kagent-proto/src/kagent python/packages/kagent-proto/src/buf
 
 .PHONY: proto-check
@@ -187,25 +184,6 @@ proto-check: proto-lint proto-generate ## Regenerate protobuf artifacts and fail
 		git status --short -- $(PROTO_GENERATED_PATHS); \
 		exit 1; \
 	fi
-
-##@ Environment documentation
-
-ENV_DOCS_COMMAND = cd go && go run ./core/cli/cmd/kagent env --format markdown
-
-.PHONY: env-docs
-env-docs: ## Generate docs/env.md from the environment variable registry
-	@set -eu; generated=$$(mktemp); trap 'rm -f "$$generated"' EXIT; \
-		($(ENV_DOCS_COMMAND)) > "$$generated"; \
-		cp "$$generated" docs/env.md
-
-.PHONY: env-docs-check
-env-docs-check: ## Check docs/env.md matches the environment variable registry
-	@set -eu; generated=$$(mktemp); trap 'rm -f "$$generated"' EXIT; \
-		($(ENV_DOCS_COMMAND)) > "$$generated"; \
-		if ! diff -u docs/env.md "$$generated"; then \
-			echo "Environment documentation is out of date. Run 'make env-docs' and commit docs/env.md."; \
-			exit 1; \
-		fi
 
 ##@ Telemetry contract
 
@@ -240,6 +218,29 @@ semconv-verify: semconv-check semconv-policies-test semconv-generate ## Check th
 	@if test -n "$$(git status --porcelain -- $(SEMCONV_GENERATED_PATHS))"; then \
 		echo "Generated telemetry conventions are out of date. Run 'make semconv-generate' and commit the result:"; \
 		git status --short -- $(SEMCONV_GENERATED_PATHS); \
+		exit 1; \
+	fi
+
+##@ Diagrams
+
+# Kroki's Excalidraw renderer: POST a scene, receive an SVG. The Diagram Render
+# Check service container in ci.yaml must run the same image, and CI fails when
+# it does not; that job also sets KROKI_EXCALIDRAW_URL itself.
+KROKI_EXCALIDRAW_IMAGE ?= yuzutech/kroki-excalidraw:0.35.0@sha256:9697a29506d2bea4268586c402735754fe6eb0bcff974ca37676b27b1bd48bcb
+KROKI_EXCALIDRAW_URL ?= http://localhost:8004/
+DIAGRAM_SCENES = $(shell git ls-files -- '*.excalidraw')
+DIAGRAM_SVGS = $(DIAGRAM_SCENES:.excalidraw=.svg)
+
+.PHONY: diagrams-render
+diagrams-render: ## Render every Excalidraw scene, NAME.excalidraw, to NAME.svg beside it, starting the pinned renderer for the run unless one answers at KROKI_EXCALIDRAW_URL
+	@CONTAINER_RUNTIME=$(CONTAINER_RUNTIME) KROKI_EXCALIDRAW_IMAGE=$(KROKI_EXCALIDRAW_IMAGE) KROKI_EXCALIDRAW_URL=$(KROKI_EXCALIDRAW_URL) \
+		bash scripts/render-diagrams.sh $(DIAGRAM_SCENES)
+
+.PHONY: diagrams-check
+diagrams-check: diagrams-render ## Fail when a diagram SVG is missing or differs from a fresh render of its scene
+	@if test -n "$$(git status --porcelain -- $(DIAGRAM_SVGS))"; then \
+		echo "Diagrams are out of date. Run 'make diagrams-render' and commit the result:"; \
+		git status --short -- $(DIAGRAM_SVGS); \
 		exit 1; \
 	fi
 
@@ -320,7 +321,7 @@ endif
 .PHONY: build-all
 build-all: ## Build all images for amd64+arm64 without pushing (outputs to /dev/null for CI validation)
 build-all: BUILD_ARGS ?= --progress=plain --builder $(BUILDX_BUILDER_NAME) --platform linux/amd64,linux/arm64 --output type=tar,dest=/dev/null
-build-all: $(BUILD_PROTO_GENERATE) buildx-create
+build-all: buildx-create
 	$(DOCKER_BUILDER) $(BUILD_ARGS) $(TOOLS_IMAGE_BUILD_ARGS) -f go/Dockerfile     ./go
 	$(DOCKER_BUILDER) $(BUILD_ARGS) $(TOOLS_IMAGE_BUILD_ARGS) -f go/harness/claude/Dockerfile ./go
 	$(DOCKER_BUILDER) $(BUILD_ARGS) $(TOOLS_IMAGE_BUILD_ARGS) -f go/harness/codex/Dockerfile ./go
@@ -349,12 +350,10 @@ endif
 
 .PHONY: build-cli
 build-cli: ## Build the kagent CLI (cross-compiled via go sub-make)
-build-cli: $(BUILD_PROTO_GENERATE)
 	make -C go build
 
 .PHONY: build-cli-local
 build-cli-local: ## Build the kagent CLI binary for the local machine
-build-cli-local: $(BUILD_PROTO_GENERATE)
 	make -C go clean
 	make -C go core/bin/kagent-local
 
@@ -375,19 +374,19 @@ controller-manifests: ## Regenerate CRD manifests in the Helm chart
 build-controller: ## Build and push the controller image
 build-controller: buildx-create
 	$(DOCKER_BUILDER) $(DOCKER_BUILD_ARGS) $(TOOLS_IMAGE_BUILD_ARGS) \
-		--build-arg BUILD_PACKAGE=core/cmd/controller/main.go \
+		--build-arg BUILD_PACKAGE=./core/cmd/controller \
 		-t $(CONTROLLER_IMG) -f go/Dockerfile ./go
 	$(DOCKER_PUSH) $(CONTROLLER_IMG)
 
 .PHONY: build-ui
 build-ui: ## Build and push the UI image
-build-ui: $(BUILD_PROTO_GENERATE) buildx-create
+build-ui: buildx-create
 	$(DOCKER_BUILDER) $(DOCKER_BUILD_ARGS) $(TOOLS_IMAGE_BUILD_ARGS) -t $(UI_IMG) -f ui/Dockerfile ./ui
 	$(DOCKER_PUSH) $(UI_IMG)
 
 .PHONY: build-golang-adk
 build-golang-adk: ## Build and push the Go ADK image
-build-golang-adk: $(BUILD_PROTO_GENERATE) buildx-create
+build-golang-adk: buildx-create
 	mkdir -p "$(RUNTIME_BUILD_METADATA_DIR)"
 	$(DOCKER_BUILDER) $(DOCKER_BUILD_ARGS) $(RUNTIME_METADATA_BUILD_ARGS) $(TOOLS_IMAGE_BUILD_ARGS) --build-arg BUILD_PACKAGE=adk/cmd/main.go -t $(GOLANG_ADK_IMG) -f go/Dockerfile ./go
 	$(call push-runtime-image,$(GOLANG_ADK_IMG))
@@ -469,14 +468,10 @@ helm-test: helm-version
 	helm plugin ls | grep unittest || helm plugin install https://github.com/helm-unittest/helm-unittest.git
 	helm unittest helm/kagent
 
-.PHONY: helm-tools
-helm-tools: ## Package all tool Helm charts into the dist folder
-	VERSION=$(VERSION) envsubst < "$(HELM_SOURCE_DIR)/tools/grafana-mcp/Chart-template.yaml" > "$(HELM_SOURCE_DIR)/tools/grafana-mcp/Chart.yaml"
-	helm package -d "$(HELM_DIST_FOLDER)" "$(HELM_SOURCE_DIR)/tools/grafana-mcp"
-
 .PHONY: helm-version
 helm-version: ## Stamp chart versions, update dependencies, and package kagent + kagent-crds
-helm-version: helm-cleanup helm-tools
+helm-version: helm-cleanup
+	rm -rf "$(HELM_SOURCE_DIR)/kagent/charts" "$(HELM_SOURCE_DIR)/kagent-crds/charts"
 	VERSION=$(VERSION) envsubst < "$(HELM_SOURCE_DIR)/kagent-crds/Chart-template.yaml" > "$(HELM_SOURCE_DIR)/kagent-crds/Chart.yaml"
 	VERSION=$(VERSION) envsubst < "$(HELM_SOURCE_DIR)/kagent/Chart-template.yaml" > "$(HELM_SOURCE_DIR)/kagent/Chart.yaml"
 	helm dependency update "$(HELM_SOURCE_DIR)/kagent"
@@ -639,6 +634,15 @@ helm-publish: helm-release
 
 ##@ Dev
 
+.PHONY: setup
+setup: create-kind-cluster ## Create the kind cluster if it does not exist
+
+.PHONY: deploy
+deploy: build kagent-cli-deploy ## Build images from this checkout and install them into the kind cluster
+
+.PHONY: run
+run: setup deploy ## Bootstrap a local dev environment
+
 .PHONY: kagent-cli-install
 kagent-cli-install: ## Build CLI locally, install kagent, and open the dashboard
 kagent-cli-install: kagent-cli-deploy
@@ -647,10 +651,11 @@ kagent-cli-install: kagent-cli-deploy
 .PHONY: kagent-cli-deploy
 kagent-cli-deploy: ## Build CLI locally and install kagent with Substrate and the development database
 kagent-cli-deploy: use-kind-cluster build-cli-local helm-dev
-	printf '%s\n' 'registry: "$(DOCKER_REGISTRY)"' 'tag: "$(VERSION)"' 'imagePullPolicy: Always' 'controller: {image: {pullPolicy: Always}}' 'ui: {image: {pullPolicy: Always}}' > go/core/bin/local-values.yaml
-	printf '%s\n' 'atelet:' '  extraArgs: [--localhost-registry-replacement=kind-registry:5000]' 'ateApi:' '  extraArgs: [--template-resync-interval=250ms]' > go/core/bin/local-substrate-values.yaml
-	printf '%s\n' 'install:' '  defaultModelProvider: $(shell printf "%s" "$(MODEL_PROVIDER)" | awk "{print toupper(substr(\$$0,1,1)) substr(\$$0,2)}")' '  kagent:' '    repository: "$(abspath $(HELM_SOURCE_DIR))/"' '    version: "$(VERSION)"' '    valuesFiles: [local-values.yaml]' '  substrate:' '    repository: "$(SUBSTRATE_REPO)/"' '    version: "$(SUBSTRATE_VERSION)"' '    valuesFiles: [local-substrate-values.yaml]' '  podCertificate:' '    repository: "$(SUBSTRATE_PODCERT_REPO)/"' '    version: "$(SUBSTRATE_PODCERT_VERSION)"' > go/core/bin/local-config.yaml
-	KUBECONFIG=$(KIND_KUBECONFIG) ./go/core/bin/kagent-local --config go/core/bin/local-config.yaml install
+	@printf '%s\n' 'registry: "$(DOCKER_REGISTRY)"' 'tag: "$(VERSION)"' 'imagePullPolicy: Always' 'controller: {image: {pullPolicy: Always}}' 'ui: {image: {pullPolicy: Always}}' > go/core/bin/local-values.yaml
+	@printf '%s\n' 'atelet:' '  extraArgs: [--localhost-registry-replacement=kind-registry:5000]' > go/core/bin/local-atelet-values.yaml
+	@printf '%s\n' 'ateApi:' '  extraArgs: [--template-resync-interval=250ms]' > go/core/bin/local-substrate-values.yaml
+	@printf '%s\n' 'install:' '  defaultModelProvider: $(shell printf "%s" "$(MODEL_PROVIDER)" | awk "{print toupper(substr(\$$0,1,1)) substr(\$$0,2)}")' '  kagent:' '    repository: "$(abspath $(HELM_SOURCE_DIR))/"' '    version: "$(VERSION)"' '    valuesFiles: [local-values.yaml]' '  substrate:' '    repository: "$(SUBSTRATE_REPO)/"' '    version: "$(SUBSTRATE_VERSION)"' '    valuesFiles: [local-substrate-values.yaml]' '  atelet:' '    valuesFiles: [local-atelet-values.yaml]' '  podCertificate:' '    repository: "$(SUBSTRATE_PODCERT_REPO)/"' '    version: "$(SUBSTRATE_PODCERT_VERSION)"' > go/core/bin/local-config.yaml
+	@KUBECONFIG=$(KIND_KUBECONFIG) ./go/core/bin/kagent-local --config go/core/bin/local-config.yaml install
 
 .PHONY: kagent-cli-port-forward
 kagent-cli-port-forward: ## Port-forward the kagent controller API to localhost:8083

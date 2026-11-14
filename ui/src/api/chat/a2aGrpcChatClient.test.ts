@@ -12,8 +12,8 @@
  * against a live controller, and none of them is implied by the protocol.
  */
 
-import { afterEach, describe, expect, it } from "vitest";
-import { createRouterTransport } from "@connectrpc/connect";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { Code, ConnectError, createRouterTransport } from "@connectrpc/connect";
 import type { ConnectRouter } from "@connectrpc/connect";
 import { fromJson } from "@bufbuild/protobuf";
 import { ValueSchema } from "@bufbuild/protobuf/wkt";
@@ -23,8 +23,11 @@ import {
   TaskState,
   type SendMessageRequest,
 } from "@/generated/a2a_pb";
+import { ErrorInfoSchema } from "@/generated/google/rpc/error_details_pb";
 import { setApiTransport } from "../transport";
 import { A2AGrpcChatClient } from "./a2aGrpcChatClient";
+import { isSendNotAccepted, mayNeedRecovery, SEND_NOT_ACCEPTED, TURN_ACTIVE } from "../ApiError";
+import { LinkFile } from "./attachments";
 import { A2A_METADATA } from "./a2aMetadata";
 import type { ChatEvent, ChatMessage } from "./types";
 
@@ -214,6 +217,7 @@ describe("A2AGrpcChatClient.send, answering a question", () => {
     })) {
       void event;
     }
+    expect(headers?.["a2a-version"]).toBe("1.0");
     expect(headers?.["a2a-extensions"]).toBe("https://kagent.dev/extensions/hitl/v1");
   });
 
@@ -1234,6 +1238,36 @@ describe("A2AGrpcChatClient.history", () => {
     ]);
   });
 
+  it("renders an unpaired rejection carrying the person's reason as not run", async () => {
+    serveTasks([
+      {
+        id: "task-1",
+        contextId: CONVERSATION.id,
+        status: { state: TaskState.COMPLETED, timestamp: { seconds: 1767225600n } },
+        history: [],
+        artifacts: [
+          {
+            artifactId: "rejected",
+            parts: [
+              data({
+                name: "k8s_get_resources",
+                response: {
+                  error: "Tool call was rejected by user. Reason: What does this tool do?",
+                  isError: true,
+                },
+              }),
+            ],
+          },
+        ],
+      },
+    ]);
+
+    const { messages } = await new A2AGrpcChatClient().history(CONVERSATION);
+    expect(messages[0].parts).toEqual([
+      expect.objectContaining({ kind: "data", dataKind: "tool_not_run" }),
+    ]);
+  });
+
   it("hides a rejected FunctionResponse when the structured decision records it", async () => {
     serveTasks([
       {
@@ -1640,6 +1674,52 @@ describe("A2AGrpcChatClient files", () => {
     expect(new TextDecoder().decode(part?.content.value as Uint8Array)).toBe("# hi");
   });
 
+  it("sends a link from the text as a url part after the text, with no bytes", async () => {
+    let captured: SendMessageRequest | undefined;
+    serve(({ service }) => {
+      service(A2AService, {
+        // eslint-disable-next-line require-yield
+        sendStreamingMessage: async function* (request) {
+          captured = request;
+        },
+      });
+    });
+    const link = "https://files.example/a/report.pdf?sig=abc";
+    for await (const event of new A2AGrpcChatClient().send({
+      conversation: CONVERSATION,
+      text: `summarize ${link}`,
+      files: [new LinkFile(link)],
+    })) {
+      void event;
+    }
+    const [text, part] = captured?.message?.parts ?? [];
+    expect(text?.content).toEqual({ case: "text", value: `summarize ${link}` });
+    expect(part?.content).toEqual({ case: "url", value: link });
+    expect(part?.filename).toBe("report.pdf");
+    expect(part?.mediaType).toBe("application/pdf");
+  });
+
+  it("keeps the chip of an agent-sent link that its text also names", async () => {
+    const link = "https://files.example/out/report.pdf";
+    const events = await turn([
+      statusFrame({
+        state: TaskState.WORKING,
+        message: {
+          messageId: "m-agent-link",
+          role: Role.AGENT,
+          parts: [
+            { content: { case: "text" as const, value: `Your report is ready: ${link}` } },
+            { content: { case: "url" as const, value: link }, filename: "report.pdf", mediaType: "application/pdf" },
+          ],
+        },
+      }),
+    ]);
+    expect(transcript(events)[0]?.parts).toEqual([
+      { kind: "text", text: `Your report is ready: ${link}` },
+      { kind: "file", name: "report.pdf", mediaType: "application/pdf", url: link },
+    ]);
+  });
+
   it("renders a file the agent sent rather than dropping it", async () => {
     const events = await turn([
       statusFrame({
@@ -1668,6 +1748,23 @@ describe("A2AGrpcChatClient files", () => {
     ]);
   });
 
+  it("shows no chip for a link whose URL is in the message text", async () => {
+    const link = "https://files.example/a.pdf";
+    const events = await turn([
+      statusFrame({
+        message: {
+          messageId: "m-text-link",
+          role: Role.USER,
+          parts: [
+            { content: { case: "text" as const, value: `summarize ${link}` } },
+            { content: { case: "url" as const, value: link }, filename: "a.pdf", mediaType: "application/pdf" },
+          ],
+        },
+      }),
+    ]);
+    expect(transcript(events)[0]?.parts).toEqual([{ kind: "text", text: `summarize ${link}` }]);
+  });
+
   it("names a linked file by its path and drops non-http links", async () => {
     const events = await turn([
       statusFrame({
@@ -1694,5 +1791,504 @@ describe("A2AGrpcChatClient files", () => {
         url: "https://files.example/out/report.pdf?sig=abc",
       },
     ]);
+  });
+});
+
+/**
+ * A stream cut by something between the browser and the controller.
+ *
+ * Measured behind a proxy that closes streams after 60 s without data: the model
+ * read a long prompt silently, the browser saw `network error`, and the turn was
+ * shown as failed while the task finished on the server.
+ */
+describe("A2AGrpcChatClient.send, when the stream breaks", () => {
+  const completed = {
+    payload: {
+      case: "task" as const,
+      value: {
+        id: "task-1",
+        contextId: CONVERSATION.contextId,
+        status: { state: TaskState.COMPLETED },
+        artifacts: [{ artifactId: "answer", parts: [text("checkout is out of memory")] }],
+      },
+    },
+  };
+
+  /** What `SubscribeToTask` opens with while the task is still running. */
+  const snapshot = {
+    payload: {
+      case: "task" as const,
+      value: {
+        id: "task-1",
+        contextId: CONVERSATION.contextId,
+        status: { state: TaskState.WORKING },
+      },
+    },
+  };
+
+  const broken = () => new ConnectError("network error", Code.Unavailable);
+
+  // Re-attaching waits between attempts and judges a stream by how long it lasted,
+  // so the clock is driven by the test rather than waited out.
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  async function run(
+    sent: () => AsyncGenerator<unknown>,
+    subscribe: (attempt: number) => AsyncGenerator<unknown> = async function* () {},
+  ) {
+    const subscribed: unknown[] = [];
+    serve(({ service }) => {
+      service(A2AService, {
+        sendStreamingMessage: sent as never,
+        subscribeToTask: async function* (request) {
+          subscribed.push({ tenant: request.tenant, id: request.id });
+          for await (const frame of subscribe(subscribed.length)) yield frame as never;
+        },
+      });
+    });
+    const events: ChatEvent[] = [];
+    let error: unknown;
+    let done = false;
+    const turn = (async () => {
+      try {
+        for await (const event of new A2AGrpcChatClient().send({
+          conversation: CONVERSATION,
+          text: "why is checkout crashlooping?",
+        })) {
+          events.push(event);
+        }
+      } catch (cause) {
+        error = cause;
+      } finally {
+        done = true;
+      }
+    })();
+    // Ten simulated minutes at most, so a loop that never ends fails the test
+    // instead of hanging it.
+    for (let second = 0; !done && second < 600; second += 1) {
+      await vi.advanceTimersByTimeAsync(1_000);
+    }
+    expect(done).toBe(true);
+    await turn;
+    return { events, error, subscribed };
+  }
+
+  it("follows the task it already named instead of failing the turn", async () => {
+    const { events, error, subscribed } = await run(
+      async function* () {
+        yield statusFrame({});
+        throw new ConnectError("network error", Code.Unknown);
+      },
+      async function* () {
+        yield completed;
+      },
+    );
+    expect(error).toBeUndefined();
+    expect(subscribed).toEqual([{ tenant: CONVERSATION.agent, id: "task-1" }]);
+    expect(events.at(-1)).toMatchObject({ type: "status", state: "completed", taskId: "task-1" });
+    expect(transcript(events).map(textOf)).toContain("checkout is out of memory");
+  });
+
+  it("does not re-attach before the stream has named a task", async () => {
+    const { error, subscribed } = await run(async function* () {
+      yield* [];
+      throw new ConnectError("network error", Code.Unknown);
+    });
+    expect(error).toBeDefined();
+    expect(subscribed).toEqual([]);
+  });
+
+  it("surfaces an error the controller decided", async () => {
+    const { error, subscribed } = await run(async function* () {
+      yield statusFrame({});
+      throw new ConnectError("dispatch busy", Code.FailedPrecondition);
+    });
+    expect(error).toMatchObject({ message: "dispatch busy" });
+    expect(subscribed).toEqual([]);
+  });
+
+  it("gives up after repeated breaks with nothing in between", async () => {
+    const { error, subscribed } = await run(
+      async function* () {
+        yield statusFrame({});
+        throw new ConnectError("network error", Code.Unknown);
+      },
+      async function* () {
+        yield* [];
+        throw new ConnectError("network error", Code.Unavailable);
+      },
+    );
+    expect(error).toBeDefined();
+    expect(subscribed).toHaveLength(3);
+  });
+
+  // The server opens every re-attached stream with the task as it stands, so a
+  // path that breaks right after that frame must still run out of attempts. The
+  // completed task after twenty attempts only stops a loop that never gives up.
+  it("gives up when each re-attach breaks right after the task's snapshot", async () => {
+    const { error, subscribed } = await run(
+      async function* () {
+        yield statusFrame({});
+        throw broken();
+      },
+      async function* (attempt) {
+        if (attempt > 20) {
+          yield completed;
+          return;
+        }
+        yield snapshot;
+        throw broken();
+      },
+    );
+    expect(error).toBeDefined();
+    expect(subscribed).toHaveLength(3);
+  });
+
+  it("keeps following a task whose re-attached streams are cut for being quiet", async () => {
+    const { events, error, subscribed } = await run(
+      async function* () {
+        yield statusFrame({});
+        throw broken();
+      },
+      async function* (attempt) {
+        if (attempt > 4) {
+          yield completed;
+          return;
+        }
+        yield snapshot;
+        await new Promise((resolve) => setTimeout(resolve, 60_000));
+        throw broken();
+      },
+    );
+    expect(error).toBeUndefined();
+    expect(subscribed).toHaveLength(5);
+    expect(events.at(-1)).toMatchObject({ type: "status", state: "completed", taskId: "task-1" });
+  });
+
+  it("starts counting again after a re-attach that brought news", async () => {
+    const { events, error, subscribed } = await run(
+      async function* () {
+        yield statusFrame({});
+        throw broken();
+      },
+      async function* (attempt) {
+        if (attempt > 4) {
+          yield completed;
+          return;
+        }
+        yield snapshot;
+        yield statusFrame({});
+        throw broken();
+      },
+    );
+    expect(error).toBeUndefined();
+    expect(subscribed).toHaveLength(5);
+    expect(events.at(-1)).toMatchObject({ type: "status", state: "completed", taskId: "task-1" });
+  });
+
+  // A reply that started while the stream was down is first seen in the snapshot,
+  // as the chunks stored so far. The chunk after it is an increment to that text.
+  // The turn stops before the closing chunk, which would replace the text whole
+  // and hide the difference.
+  it("continues a reply the snapshot showed instead of replacing it", async () => {
+    const chunk = (value: string, flags: { append?: boolean } = {}) => ({
+      payload: {
+        case: "artifactUpdate" as const,
+        value: {
+          taskId: "task-1",
+          contextId: CONVERSATION.contextId,
+          artifact: { artifactId: "a-1", parts: [text(value)] },
+          ...flags,
+        },
+      },
+    });
+    const { events, error } = await run(
+      async function* () {
+        yield statusFrame({});
+        throw broken();
+      },
+      async function* () {
+        yield {
+          payload: {
+            case: "task" as const,
+            value: {
+              ...snapshot.payload.value,
+              artifacts: [{ artifactId: "a-1", parts: [text("alpha"), text(" beta")] }],
+            },
+          },
+        };
+        yield chunk(" gamma", { append: true });
+      },
+    );
+    expect(error).toBeUndefined();
+    const agent = transcript(events).filter((message) => message.role === "agent");
+    expect(agent.map(textOf), "not \" gamma\"").toEqual(["alpha beta gamma"]);
+  });
+
+  // " gamma" was sent while the second re-attach was waiting, so only the second
+  // snapshot has it.
+  it("shows what a later snapshot adds to a reply already on screen", async () => {
+    const chunk = (value: string, flags: { append?: boolean } = {}) => ({
+      payload: {
+        case: "artifactUpdate" as const,
+        value: {
+          taskId: "task-1",
+          contextId: CONVERSATION.contextId,
+          artifact: { artifactId: "a-1", parts: [text(value)] },
+          ...flags,
+        },
+      },
+    });
+    const withReply = (...chunks: string[]) => ({
+      payload: {
+        case: "task" as const,
+        value: {
+          ...snapshot.payload.value,
+          artifacts: [{ artifactId: "a-1", parts: chunks.map(text) }],
+        },
+      },
+    });
+    const { events, error } = await run(
+      async function* () {
+        yield statusFrame({});
+        throw broken();
+      },
+      async function* (attempt) {
+        if (attempt === 1) {
+          yield withReply("alpha");
+          yield chunk(" beta", { append: true });
+          throw broken();
+        }
+        yield withReply("alpha", " beta", " gamma");
+        yield chunk(" delta", { append: true });
+      },
+    );
+    expect(error).toBeUndefined();
+    const agent = transcript(events).filter((message) => message.role === "agent");
+    expect(agent.map(textOf), "not \"alpha beta delta\"").toEqual(["alpha beta gamma delta"]);
+  });
+
+  it("stops waiting to re-attach when the reader presses stop", async () => {
+    const subscribed: unknown[] = [];
+    serve(({ service }) => {
+      service(A2AService, {
+        sendStreamingMessage: async function* () {
+          yield statusFrame({}) as never;
+          throw broken();
+        },
+        subscribeToTask: async function* () {
+          subscribed.push(true);
+          yield completed as never;
+        },
+      });
+    });
+    const stop = new AbortController();
+    const events: ChatEvent[] = [];
+    const turn = (async () => {
+      for await (const event of new A2AGrpcChatClient().send({
+        conversation: CONVERSATION,
+        text: "why is checkout crashlooping?",
+        signal: stop.signal,
+      })) {
+        events.push(event);
+      }
+    })();
+    const outcome = expect(turn).rejects.toMatchObject({ name: "AbortError" });
+    // The stream has broken and the first re-attach is waiting its 500 ms.
+    await vi.advanceTimersByTimeAsync(100);
+    stop.abort();
+    await vi.advanceTimersByTimeAsync(1_000);
+    await outcome;
+    expect(subscribed).toEqual([]);
+  });
+});
+
+/*
+ * A send that reaches a crashed runtime reverts it on the server and is refused with
+ * proof that the message was not accepted. The client sends the identical request
+ * again, which is safe because a repeated message ID cannot be accepted twice.
+ */
+describe("A2AGrpcChatClient.send, when the gateway did not accept the message", () => {
+  /** The error a2a-go writes for kagent's ErrSendNotAccepted. */
+  const notAccepted = (metadata: Record<string, string> = { reason: "KAGENT_SEND_NOT_ACCEPTED", retryAfterMs: "100" }, code = Code.FailedPrecondition) =>
+    new ConnectError("input was not accepted; retry after the session becomes available", code, undefined, [
+      { desc: ErrorInfoSchema, value: { reason: "UNSUPPORTED_OPERATION", domain: "a2a-protocol.org", metadata } },
+    ]);
+
+  const completed = statusFrame({ state: TaskState.COMPLETED });
+
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  async function run(attempt: (n: number) => AsyncGenerator<unknown>, signal?: AbortSignal, stopResending?: AbortSignal) {
+    const requests: SendMessageRequest[] = [];
+    serve(({ service }) => {
+      service(A2AService, {
+        sendStreamingMessage: async function* (request) {
+          requests.push(request);
+          for await (const frame of attempt(requests.length)) yield frame as never;
+        },
+      });
+    });
+    const events: ChatEvent[] = [];
+    let error: unknown;
+    let done = false;
+    const turn = (async () => {
+      try {
+        for await (const event of new A2AGrpcChatClient().send({
+          conversation: CONVERSATION,
+          text: "why is checkout crashlooping?",
+          messageId: "msg-local-1",
+          signal,
+          stopResending,
+        })) {
+          events.push(event);
+        }
+      } catch (cause) {
+        error = cause;
+      } finally {
+        done = true;
+      }
+    })();
+    for (let tick = 0; !done && tick < 600; tick += 1) {
+      await vi.advanceTimersByTimeAsync(100);
+    }
+    expect(done).toBe(true);
+    await turn;
+    return { events, error, requests };
+  }
+
+  it("re-sends the identical request until the gateway accepts it", async () => {
+    const { events, error, requests } = await run(async function* (n) {
+      if (n < 3) throw notAccepted();
+      yield completed;
+    });
+    expect(error).toBeUndefined();
+    expect(requests).toHaveLength(3);
+    expect(requests.map((request) => request.message?.messageId)).toEqual(["msg-local-1", "msg-local-1", "msg-local-1"]);
+    expect(requests[2]).toEqual(requests[0]);
+    expect(events.at(-1)).toMatchObject({ type: "status", state: "completed" });
+  });
+
+  it("waits as long as the gateway asks before re-sending", async () => {
+    const sentAt: number[] = [];
+    const { error } = await run(async function* (n) {
+      sentAt.push(Date.now());
+      if (n === 1) throw notAccepted({ reason: "KAGENT_SEND_NOT_ACCEPTED", retryAfterMs: "1500" });
+      yield completed;
+    });
+    expect(error).toBeUndefined();
+    expect(sentAt[1] - sentAt[0]).toBeGreaterThanOrEqual(1_500);
+  });
+
+  it("never re-sends once a frame has arrived", async () => {
+    const { error, requests } = await run(async function* () {
+      yield statusFrame({});
+      throw notAccepted();
+    });
+    expect(error).toMatchObject({ code: "FailedPrecondition" });
+    expect(mayNeedRecovery(error)).toBe(false);
+    expect(requests).toHaveLength(1);
+  });
+
+  it.each([
+    ["an earlier turn that is still open", notAccepted({ reason: TURN_ACTIVE }), TURN_ACTIVE],
+    ["another metadata reason", notAccepted({ reason: "SOMETHING_ELSE" }), undefined],
+    ["no metadata, as for a runtime that cannot be recovered", notAccepted({}), undefined],
+    ["another gRPC code", notAccepted(undefined, Code.Unavailable), undefined],
+    ["no ErrorInfo", new ConnectError("Session runtime cannot be recovered; start another conversation", Code.FailedPrecondition), undefined],
+  ])("does not re-send for %s", async (_, refusal, reason) => {
+    const { error, requests } = await run(async function* () {
+      yield* [];
+      throw refusal;
+    });
+    expect(error).toBeDefined();
+    expect(isSendNotAccepted(error)).toBe(false);
+    expect((error as { reason?: string }).reason).toBe(reason);
+    expect(mayNeedRecovery(error)).toBe(reason !== undefined);
+    expect(requests).toHaveLength(1);
+  });
+
+  it("keeps the gateway's words for a busy Session", async () => {
+    const { error } = await run(async function* () {
+      yield* [];
+      throw new ConnectError("resource conflict", Code.FailedPrecondition, undefined, [
+        { desc: ErrorInfoSchema, value: { reason: "UNSUPPORTED_OPERATION", domain: "a2a-protocol.org", metadata: { reason: TURN_ACTIVE } } },
+      ]);
+    });
+    expect(error).toMatchObject({ message: "resource conflict", code: "FailedPrecondition", reason: TURN_ACTIVE });
+  });
+
+  it("doubles the wait between re-sends, up to two seconds", async () => {
+    const sentAt: number[] = [];
+    await run(async function* () {
+      sentAt.push(Date.now());
+      yield* [];
+      throw notAccepted();
+    });
+    const waits = sentAt.slice(1).map((at, i) => at - sentAt[i]);
+    expect(waits.slice(0, 6)).toEqual([100, 200, 400, 800, 1_600, 2_000]);
+    expect(Math.max(...waits)).toBe(2_000);
+  });
+
+  it("surfaces the refusal as not accepted once the retry window is spent", async () => {
+    const { error, requests } = await run(async function* () {
+      yield* [];
+      throw notAccepted();
+    });
+    expect(error).toMatchObject({ code: "FailedPrecondition", reason: SEND_NOT_ACCEPTED });
+    expect(isSendNotAccepted(error)).toBe(true);
+    // 100 ms doubling to 2 s within 30 s: 19 sends, rather than one every 100 ms.
+    expect(requests).toHaveLength(19);
+  });
+
+  it("keeps re-sending while the runtime recovers, and says so when the window is spent", async () => {
+    const sentAt: number[] = [];
+    const { error } = await run(async function* () {
+      sentAt.push(Date.now());
+      yield* [];
+      throw notAccepted({ reason: "KAGENT_SEND_NOT_ACCEPTED", state: "RECOVERING", retryAfterMs: "1000" });
+    });
+    expect(error).toMatchObject({ reason: SEND_NOT_ACCEPTED, message: "The agent's runtime is still recovering from a crash." });
+    expect(mayNeedRecovery(error)).toBe(true);
+    // The gateway's longer delay is the floor, so a recovery costs a few sends.
+    expect(sentAt[1] - sentAt[0]).toBeGreaterThanOrEqual(1_000);
+  });
+
+  it("stops re-sending once the reader stops before the task is named, mid-wait", async () => {
+    const stop = new AbortController();
+    const { error, requests } = await run(async function* () {
+      // Stop arrives while the client waits to send again.
+      setTimeout(() => stop.abort(), 50);
+      yield* [];
+      throw notAccepted({ reason: "KAGENT_SEND_NOT_ACCEPTED", retryAfterMs: "1000" });
+    }, undefined, stop.signal);
+    expect(requests).toHaveLength(1);
+    // The turn is not aborted: the last refusal ends it, and nothing is running.
+    expect(error).toMatchObject({ code: "FailedPrecondition" });
+  });
+
+  it("never re-sends a refusal that arrives after the reader stopped", async () => {
+    const stop = new AbortController();
+    stop.abort();
+    const { error, requests } = await run(async function* () {
+      yield* [];
+      throw notAccepted();
+    }, undefined, stop.signal);
+    expect(requests).toHaveLength(1);
+    expect(error).toMatchObject({ code: "FailedPrecondition" });
+  });
+
+  it("stops re-sending when the reader presses stop", async () => {
+    const stop = new AbortController();
+    // The reader presses stop while the client waits to send a third time.
+    const { error, requests } = await run(async function* (n) {
+      if (n === 2) setTimeout(() => stop.abort(), 50);
+      yield* [];
+      throw notAccepted({ reason: "KAGENT_SEND_NOT_ACCEPTED", retryAfterMs: "1000" });
+    }, stop.signal);
+    expect(error).toMatchObject({ name: "AbortError" });
+    expect(requests).toHaveLength(2);
   });
 });

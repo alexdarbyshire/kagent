@@ -13,12 +13,12 @@ func CLIBindings(config *configv1.ADKAgentConfig) []MCPCLIConfig {
 		cli := MCPCLIConfig{Name: binding.Name, Description: binding.Description}
 		if h := binding.Http; h != nil {
 			p := h.GetParams()
-			cli.HTTP = HttpMcpServerConfig{Tools: h.Tools, AllowedHeaders: h.AllowedHeaders, RequireApproval: h.RequireApproval,
+			cli.HTTP = HttpMcpServerConfig{Tools: h.Tools, AllowedHeaders: h.AllowedHeaders, RequireApproval: h.RequireApproval, TokenPassthrough: h.TokenPassthrough,
 				Params: StreamableHTTPConnectionParams{Url: p.GetUrl(), Headers: p.GetHeaders(), Timeout: seconds(p.GetTimeout()), SseReadTimeout: seconds(p.GetSseReadTimeout()), TerminateOnClose: p.TerminateOnClose, TLSInsecureSkipVerify: p.TlsInsecureSkipVerify, TLSCACertPath: p.TlsCaCertPath, TLSDisableSystemCAs: p.TlsDisableSystemCas}}
 		}
 		if h := binding.Sse; h != nil {
 			p := h.GetParams()
-			cli.SSE = &SseMcpServerConfig{Tools: h.Tools, AllowedHeaders: h.AllowedHeaders, RequireApproval: h.RequireApproval,
+			cli.SSE = &SseMcpServerConfig{Tools: h.Tools, AllowedHeaders: h.AllowedHeaders, RequireApproval: h.RequireApproval, TokenPassthrough: h.TokenPassthrough,
 				Params: SseConnectionParams{Url: p.GetUrl(), Headers: p.GetHeaders(), Timeout: seconds(p.GetTimeout()), SseReadTimeout: seconds(p.GetSseReadTimeout()), TLSInsecureSkipVerify: p.TlsInsecureSkipVerify, TLSCACertPath: p.TlsCaCertPath, TLSDisableSystemCAs: p.TlsDisableSystemCas}}
 		}
 		result = append(result, cli)

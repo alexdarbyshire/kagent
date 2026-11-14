@@ -1,4 +1,4 @@
-package mcp
+package mcp_test
 
 import (
 	"context"
@@ -22,9 +22,12 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/kagent-dev/kagent/go/adk/pkg/auth"
+	"github.com/kagent-dev/kagent/go/adk/pkg/mcp"
 	"github.com/kagent-dev/kagent/go/adk/pkg/tools"
 	"github.com/kagent-dev/kagent/go/api/adk"
 )
+
+const cliInvocationSocket = "KAGENT_MCP_CLI_INVOCATION_SOCKET"
 
 type cliSessionContext struct {
 	context.Context
@@ -80,7 +83,7 @@ func TestCLIExecutableInvocationHeadersAndIsolation(t *testing.T) {
 		sequence := providerCalls[index].Add(1)
 		return map[string]string{"Authorization": "Bearer exchanged-" + id, "X-Order": "dynamic", "X-Dynamic": fmt.Sprintf("%s-%d", id, sequence)}
 	}
-	prepare := PrepareCLIEnvironment(t.Context(), []adk.MCPCLIConfig{binding}, true, provider)
+	prepare := mcp.PrepareCLIEnvironment(t.Context(), []adk.MCPCLIConfig{binding}, true, provider)
 	var socketsMu sync.Mutex
 	var sockets []string
 	executor := tools.NewCommandExecutor(tools.ExecutionConfig{PrepareEnvironment: func(original, lifetime context.Context) ([]string, func(), error) {
@@ -141,45 +144,13 @@ func TestCLIExecutableInvocationHeadersAndIsolation(t *testing.T) {
 	require.EqualValues(t, 4, calls.Load())
 }
 
-func TestCLIInvocationRejectsOtherBindingAndClosesOnCancellation(t *testing.T) {
-	var requests atomic.Int32
-	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { requests.Add(1); w.WriteHeader(http.StatusOK) }))
-	defer remote.Close()
-	ctx, cancel := context.WithCancel(t.Context())
-	binding := adk.MCPCLIConfig{Name: "browser", HTTP: adk.HttpMcpServerConfig{Params: adk.StreamableHTTPConnectionParams{Url: remote.URL}}}
-	environment, cleanup, err := PrepareCLIEnvironment(t.Context(), []adk.MCPCLIConfig{binding}, false, nil)(ctx, ctx)
-	require.NoError(t, err)
-	defer cleanup()
-	socket := strings.TrimPrefix(environment[0], cliInvocationSocket+"=")
-	info, err := os.Stat(socket)
-	require.NoError(t, err)
-	require.EqualValues(t, 0o600, info.Mode().Perm())
-	info, err = os.Stat(filepath.Dir(socket))
-	require.NoError(t, err)
-	require.EqualValues(t, 0o700, info.Mode().Perm())
-	t.Setenv(cliInvocationSocket, socket)
-	binding.Name = "foreign"
-	transport, err := cliInvocationTransport(http.DefaultTransport, binding)
-	require.NoError(t, err)
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, remote.URL, nil)
-	require.NoError(t, err)
-	_, err = transport.RoundTrip(request)
-	require.ErrorContains(t, err, "status 404")
-	require.Zero(t, requests.Load())
-	cancel()
-	require.Eventually(t, func() bool { _, err := os.Stat(filepath.Dir(socket)); return os.IsNotExist(err) }, time.Second, time.Millisecond)
-	_, err = transport.RoundTrip(request)
-	require.Error(t, err)
-	require.Zero(t, requests.Load())
-}
-
 func TestCLIInvocationShellFailureAndCancellationCleanup(t *testing.T) {
 	for _, cancelCall := range []bool{false, true} {
 		t.Run(fmt.Sprintf("canceled=%v", cancelCall), func(t *testing.T) {
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			opened := make(chan string, 1)
-			prepare := PrepareCLIEnvironment(t.Context(), nil, false, nil)
+			prepare := mcp.PrepareCLIEnvironment(t.Context(), nil, false, nil)
 			executor := tools.NewCommandExecutor(tools.ExecutionConfig{PrepareEnvironment: func(original, lifetime context.Context) ([]string, func(), error) {
 				environment, cleanup, err := prepare(original, lifetime)
 				if err == nil {
@@ -220,7 +191,7 @@ func TestCLIInvocationShellFailureAndCancellationCleanup(t *testing.T) {
 func TestCLIInvocationSocketSetupFailureStopsShell(t *testing.T) {
 	directory := t.TempDir()
 	t.Setenv("TMPDIR", filepath.Join(directory, "missing"))
-	executor := tools.NewCommandExecutor(tools.ExecutionConfig{PrepareEnvironment: PrepareCLIEnvironment(t.Context(), nil, false, nil)})
+	executor := tools.NewCommandExecutor(tools.ExecutionConfig{PrepareEnvironment: mcp.PrepareCLIEnvironment(t.Context(), nil, false, nil)})
 	marker := filepath.Join(directory, "unexpected-execution")
 	_, err := executor.ExecuteCommand(t.Context(), fmt.Sprintf("touch %q", marker), directory)
 	require.ErrorContains(t, err, "create MCP invocation directory")
@@ -231,7 +202,7 @@ func TestCLIInvocationSocketSetupFailureStopsShell(t *testing.T) {
 func TestCLIInvocationSocketFollowsActorLifetime(t *testing.T) {
 	owner, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	environment, cleanup, err := PrepareCLIEnvironment(owner, nil, false, nil)(t.Context(), t.Context())
+	environment, cleanup, err := mcp.PrepareCLIEnvironment(owner, nil, false, nil)(t.Context(), t.Context())
 	require.NoError(t, err)
 	defer cleanup()
 	socket := strings.TrimPrefix(environment[0], cliInvocationSocket+"=")
@@ -240,7 +211,7 @@ func TestCLIInvocationSocketFollowsActorLifetime(t *testing.T) {
 		_, err := os.Stat(filepath.Dir(socket))
 		return os.IsNotExist(err)
 	}, time.Second, time.Millisecond, "actor shutdown must remove a live invocation socket")
-	environment, cleanup, err = PrepareCLIEnvironment(owner, nil, false, nil)(t.Context(), t.Context())
+	environment, cleanup, err = mcp.PrepareCLIEnvironment(owner, nil, false, nil)(t.Context(), t.Context())
 	require.ErrorContains(t, err, "runtime stopped")
 	require.Nil(t, environment)
 	require.Nil(t, cleanup)

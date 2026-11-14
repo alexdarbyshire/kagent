@@ -16,6 +16,9 @@ func TestControllerConfig(t *testing.T) {
 		invalid     bool
 	}{
 		{"defaults", "{}", false},
+		{"actor JWT issuer", "substrate: {actorJwtIssuer: https://actors.example}", false},
+		{"empty actor JWT issuer", "substrate: {actorJwtIssuer: ''}", true},
+		{"HTTP actor JWT issuer", "substrate: {actorJwtIssuer: http://actors.example}", true},
 		{"partial images", "harnessImages: {kagent: 'registry/image@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'}", false},
 		{"empty image", "harnessImages: {codex: ''}", false},
 		{"image tag", "harnessImages: {claude: 'registry/image:latest'}", true},
@@ -34,6 +37,10 @@ func TestControllerConfig(t *testing.T) {
 		{"documents", "{}\n---\n{}", false},
 		{"field aliases", "kubernetes: {leaderElection: true, leader_election: false}", true},
 		{"pool bounds", "database: {pool: {minConns: 9, maxConns: 4}}", true},
+		{"connect retry timeout", "database: {pool: {connectRetryTimeout: 90s}}", false},
+		{"disabled connect retry", "database: {pool: {connectRetryTimeout: 0s}}", false},
+		{"negative connect retry timeout", "database: {pool: {connectRetryTimeout: -1s}}", true},
+		{"overlong connect retry timeout", "database: {pool: {connectRetryTimeout: 601s}}", true},
 		{"database schemas", "database: {schema: tenant, vectorSchema: public}", false},
 		{"invalid skip migrations type", "database: {skipMigrations: 'true'}", true},
 		{"empty database schema", "database: {schema: ''}", true},
@@ -47,6 +54,13 @@ func TestControllerConfig(t *testing.T) {
 		{"push recovery interval", "push: {recoveryInterval: 15s}", false},
 		{"zero push recovery interval", "push: {recoveryInterval: 0s}", true},
 		{"negative push recovery interval", "push: {recoveryInterval: -60s}", true},
+		{"push delivery settings", "push: {maxConcurrency: 4, sendTimeout: 60s}", false},
+		{"serial push delivery", "push: {maxConcurrency: 1}", false},
+		{"zero push concurrency", "push: {maxConcurrency: 0}", true},
+		{"negative push concurrency", "push: {maxConcurrency: -1}", true},
+		{"zero push timeout", "push: {sendTimeout: 0s}", true},
+		{"negative push timeout", "push: {sendTimeout: -1s}", true},
+		{"overflowing push timeout", "push: {sendTimeout: 9223372037s}", true},
 		{"log level", "logging: {level: verbose}", true},
 		{"runtime service name", "runtimeDefaults: {telemetry: {resourceAttributes: {service.name: shared}}}", true},
 		{"runtime service namespace", "runtimeDefaults: {telemetry: {resourceAttributes: {service.namespace: shared}}}", true},
@@ -90,6 +104,29 @@ func TestDatabaseSkipMigrations(t *testing.T) {
 	}
 }
 
+func TestDatabaseConnectRetryTimeout(t *testing.T) {
+	scenarios := []struct {
+		name, input string
+		want        time.Duration
+	}{
+		{"Given no connect retry timeout, when the controller config is defaulted, assert that logins are retried for 90s", "{}", 90 * time.Second},
+		{"Given connectRetryTimeout 0s, when the controller config is defaulted, assert that the retry stays disabled", "database: {pool: {connectRetryTimeout: 0s}}", 0},
+		{"Given connectRetryTimeout 90s, when the controller config is defaulted, assert that logins are retried for 90s", "database: {pool: {connectRetryTimeout: 90s}}", 90 * time.Second},
+	}
+	for _, scenario := range scenarios {
+		t.Run(scenario.name, func(t *testing.T) {
+			cfg := &configv1.ControllerConfig{}
+			require.NoError(t, config.Decode([]byte(scenario.input), cfg))
+
+			config.DefaultController(cfg)
+
+			setLogins(cfg)
+			require.NoError(t, config.Validate(cfg))
+			require.Equal(t, scenario.want, cfg.GetDatabase().GetPool().GetConnectRetryTimeout().AsDuration())
+		})
+	}
+}
+
 func TestDefaultingPreservesPresence(t *testing.T) {
 	cfg := &configv1.ControllerConfig{}
 	require.NoError(t, config.Decode([]byte("kubernetes: {leaderElection: false}\nsessions: {idleTtl: 0s}\ndatabase: {pool: {minConns: 0}}"), cfg))
@@ -104,6 +141,8 @@ func TestDefaultingPreservesPresence(t *testing.T) {
 	require.Equal(t, "extensions", cfg.Database.GetVectorSchema())
 	require.Empty(t, cfg.Push.SigningPrivateKeyFile)
 	require.Equal(t, time.Minute, cfg.Push.RecoveryInterval.AsDuration())
+	require.EqualValues(t, 10, cfg.Push.GetMaxConcurrency())
+	require.Equal(t, 5*time.Second, cfg.Push.SendTimeout.AsDuration())
 }
 
 func TestExplicitEmptyStringFailsSchemaValidation(t *testing.T) {
@@ -198,4 +237,24 @@ func TestYAMLConfigReadsOnlyFirstDocument(t *testing.T) {
 	cfg := &configv1.ControllerConfig{}
 	require.NoError(t, config.Decode([]byte("logging: {level: debug}\n---\n["), cfg))
 	require.Equal(t, "debug", cfg.GetLogging().GetLevel())
+}
+
+func TestSessionAutomaticRecovery(t *testing.T) {
+	for _, scenario := range []struct {
+		name, input string
+		want        bool
+	}{
+		{"omitted", "{}", false},
+		{"disabled", "sessions: {automaticRecovery: false}", false},
+		{"enabled", "sessions: {automaticRecovery: true}", true},
+	} {
+		t.Run("Given controller config with automatic recovery "+scenario.name+", when it loads, assert that the setting is preserved", func(t *testing.T) {
+			cfg := &configv1.ControllerConfig{}
+			require.NoError(t, config.Decode([]byte(scenario.input), cfg))
+			config.DefaultController(cfg)
+			setLogins(cfg)
+			require.NoError(t, config.Validate(cfg))
+			require.Equal(t, scenario.want, cfg.GetSessions().GetAutomaticRecovery())
+		})
+	}
 }

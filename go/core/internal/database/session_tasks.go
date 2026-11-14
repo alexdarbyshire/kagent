@@ -23,6 +23,18 @@ import (
 // or idle lifecycle operation currently owns the session.
 var ErrDispatchBusy = errors.New("session temporarily unavailable for dispatch")
 
+// ErrDispatchSuspending is ErrDispatchBusy because a post-turn suspension holds its
+// claim. The suspension is running, or its worker was lost and its outcome is
+// unknown: the idle worker keeps the claim rather than guess, and nothing takes it
+// over on a timeout. Only a crash recovery or Delete retires it, so the send path
+// needs to tell this cause apart from an ordinary busy dispatch.
+var ErrDispatchSuspending = fmt.Errorf("runtime suspension has not settled: %w", ErrDispatchBusy)
+
+// errSuspensionUnsettled is requireSettledRuntime's failure when a claimed
+// suspension is what keeps the runtime unsettled. It still matches
+// ErrFailedPrecondition for every other caller.
+var errSuspensionUnsettled = fmt.Errorf("runtime suspension has not settled: %w", ErrFailedPrecondition)
+
 // ErrMessageAccepted means an earlier dispatch already persisted this initial input.
 var ErrMessageAccepted = errors.New("message already accepted")
 
@@ -50,18 +62,29 @@ func (c *Client) ReserveSessionDispatch(ctx context.Context, sessionID string, d
 		if session.State != "RUNTIME_STATE_READY" || session.Operation != "RUNTIME_OPERATION_NONE" {
 			return ErrConflict
 		}
-		blocked, err := queryOne(ctx, tx, `
+		activeTurn, err := queryOne(ctx, tx, `
 			SELECT EXISTS (SELECT 1 FROM session_task WHERE history_id = $1
 			    AND state IN ('TASK_STATE_SUBMITTED', 'TASK_STATE_WORKING'))
-			    OR EXISTS (SELECT 1 FROM session_checkpoint WHERE source_session_id = $2 AND state = 'CREATING')
-		`, pgx.RowTo[bool], session.HistoryID, session.ID)
+		`, pgx.RowTo[bool], session.HistoryID)
 		if err != nil {
 			return err
 		}
-		if blocked {
+		if activeTurn {
+			return ErrActiveTurn
+		}
+		checkpointing, err := queryOne(ctx, tx, `
+			SELECT EXISTS (SELECT 1 FROM session_checkpoint WHERE source_session_id = $1 AND state = 'CREATING')
+		`, pgx.RowTo[bool], session.ID)
+		if err != nil {
+			return err
+		}
+		if checkpointing {
 			return ErrConflict
 		}
 		if err := requireSettledRuntime(ctx, tx, session.HistoryID, ""); err != nil {
+			if errors.Is(err, errSuspensionUnsettled) {
+				return ErrDispatchSuspending
+			}
 			if errors.Is(err, ErrFailedPrecondition) {
 				return ErrDispatchBusy
 			}
@@ -354,7 +377,7 @@ func storeSessionTaskEvent(ctx context.Context, tx pgx.Tx, session sessionRow, t
 	var stored *a2apb.Task
 	var taskRow sessionTaskRow
 	if row, err := queryOne(ctx, tx, `
-		SELECT history_id, id, state, status_timestamp, data, created_at, snapshot_atespace, snapshot_uri, snapshot_content_scope, history_sequence, position FROM
+		SELECT history_id, id, state, status_timestamp, data, created_at, snapshot_atespace, snapshot_uri, snapshot_fidelity, history_sequence, position FROM
 		    session_task WHERE history_id = $1 AND id = $2 FOR UPDATE
 	`, pgx.RowToStructByName[sessionTaskRow], historyID, string(task.ID)); err == nil {
 		taskRow = row
@@ -516,7 +539,7 @@ func (c *Client) ListSessionTasks(ctx context.Context, sessionID, afterID string
 	}
 	rows, err := queryMany(ctx, c.db, `
 		SELECT t.history_id, t.id, t.state, t.status_timestamp, t.data, t.created_at,
-		    t.snapshot_atespace, t.snapshot_uri, t.snapshot_content_scope,
+		    t.snapshot_atespace, t.snapshot_uri, t.snapshot_fidelity,
 		    t.history_sequence, t.position FROM session_task t
 		WHERE t.history_id = $1
 		  AND ($2::text = '' OR t.position > (
@@ -698,42 +721,42 @@ func unmarshalSessionTask(data []byte) (*a2a.Task, error) {
 }
 
 type sessionTaskRow struct {
-	HistoryID            uuid.UUID
-	ID                   string
-	State                string
-	StatusTimestamp      *time.Time
-	Data                 []byte
-	CreatedAt            time.Time
-	SnapshotAtespace     *string
-	SnapshotURI          *string
-	SnapshotContentScope *string
-	HistorySequence      *int64
-	Position             int64
+	HistoryID        uuid.UUID
+	ID               string
+	State            string
+	StatusTimestamp  *time.Time
+	Data             []byte
+	CreatedAt        time.Time
+	SnapshotAtespace *string
+	SnapshotURI      *string
+	SnapshotFidelity *string
+	HistorySequence  *int64
+	Position         int64
 }
 
 type sessionTaskEventRow struct {
-	Sequence             int64
-	HistoryID            uuid.UUID
-	TaskID               string
-	Data                 []byte
-	CreatedAt            time.Time
-	MessageID            *string
-	TaskPosition         *int64
-	SnapshotAtespace     *string
-	SnapshotURI          *string
-	SnapshotContentScope *string
+	Sequence         int64
+	HistoryID        uuid.UUID
+	TaskID           string
+	Data             []byte
+	CreatedAt        time.Time
+	MessageID        *string
+	TaskPosition     *int64
+	SnapshotAtespace *string
+	SnapshotURI      *string
+	SnapshotFidelity *string
 }
 
 type taskEventWrite struct {
-	HistoryID            uuid.UUID
-	TaskID               string
-	MessageID            *string
-	Data                 []byte
-	SnapshotAtespace     *string
-	SnapshotURI          *string
-	SnapshotContentScope *string
-	TaskPosition         *int64
-	CreatedAt            *time.Time
+	HistoryID        uuid.UUID
+	TaskID           string
+	MessageID        *string
+	Data             []byte
+	SnapshotAtespace *string
+	SnapshotURI      *string
+	SnapshotFidelity *string
+	TaskPosition     *int64
+	CreatedAt        *time.Time
 }
 
 type taskHistoryRow struct {
@@ -750,7 +773,7 @@ func insertTaskEvent(ctx context.Context, db dbExecutor, event taskEventWrite) (
 	return queryOne(ctx, db, `
 		WITH inserted AS (
 		    INSERT INTO session_task_event
-		        (history_id, task_id, message_id, data, snapshot_atespace, snapshot_uri, snapshot_content_scope,
+		        (history_id, task_id, message_id, data, snapshot_atespace, snapshot_uri, snapshot_fidelity,
 		         task_position, created_at)
 		    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, COALESCE($9::timestamptz, NOW()))
 		    ON CONFLICT (history_id, task_id, message_id)
@@ -765,7 +788,7 @@ func insertTaskEvent(ctx context.Context, db dbExecutor, event taskEventWrite) (
 		LIMIT 1
 	`,
 		pgx.RowTo[int64], event.HistoryID, event.TaskID, event.MessageID, event.Data, event.SnapshotAtespace,
-		event.SnapshotURI, event.SnapshotContentScope, event.TaskPosition,
+		event.SnapshotURI, event.SnapshotFidelity, event.TaskPosition,
 		event.CreatedAt,
 	)
 }
@@ -774,7 +797,7 @@ func insertTaskEvent(ctx context.Context, db dbExecutor, event taskEventWrite) (
 // history. Missing tasks return pgx.ErrNoRows; callers authorize access.
 func readSessionTask(ctx context.Context, db dbExecutor, historyID uuid.UUID, taskID string) (sessionTaskRow, error) {
 	return queryOne(ctx, db, `
-		SELECT history_id, id, state, status_timestamp, data, created_at, snapshot_atespace, snapshot_uri, snapshot_content_scope, history_sequence, position FROM
+		SELECT history_id, id, state, status_timestamp, data, created_at, snapshot_atespace, snapshot_uri, snapshot_fidelity, history_sequence, position FROM
 		    session_task
 		WHERE history_id = $1 AND id = $2
 	`, pgx.RowToStructByName[sessionTaskRow], historyID, taskID)
@@ -791,7 +814,7 @@ func saveTaskProjection(ctx context.Context, db dbExecutor, historyID uuid.UUID,
 		    state = EXCLUDED.state,
 		    status_timestamp = EXCLUDED.status_timestamp,
 		    data = EXCLUDED.data
-		RETURNING history_id, id, state, status_timestamp, data, created_at, snapshot_atespace, snapshot_uri, snapshot_content_scope, history_sequence, position
+		RETURNING history_id, id, state, status_timestamp, data, created_at, snapshot_atespace, snapshot_uri, snapshot_fidelity, history_sequence, position
 	`, pgx.RowToStructByName[sessionTaskRow], historyID, taskID, state, statusTimestamp, data)
 }
 
@@ -821,16 +844,23 @@ func readTaskMessages(ctx context.Context, db dbExecutor, historyID uuid.UUID, t
 // another unexpired dispatch. A writer may pass its own dispatch ID.
 // Callers hold the session lock so new execution and lifecycle claims cannot race.
 func requireSettledRuntime(ctx context.Context, db dbExecutor, historyID uuid.UUID, dispatchID string) error {
-	pending, err := queryOne(ctx, db, `
+	type unsettled struct {
+		Suspending, Pending bool
+	}
+	state, err := queryOne(ctx, db, `
 		SELECT EXISTS (SELECT 1 FROM session_task_event WHERE history_id = $1
-		    AND (NOT published OR (quiescence_pending AND quiescence_executor_id IS NOT NULL)))
+		        AND quiescence_pending AND quiescence_executor_id IS NOT NULL) AS suspending,
+		    EXISTS (SELECT 1 FROM session_task_event WHERE history_id = $1 AND NOT published)
 		    OR EXISTS (SELECT 1 FROM session WHERE history_id = $1 AND dispatch_expires_at > clock_timestamp()
-		        AND ($2::text = '' OR dispatch_id::text <> $2))
-	`, pgx.RowTo[bool], historyID, dispatchID)
+		        AND ($2::text = '' OR dispatch_id::text <> $2)) AS pending
+	`, pgx.RowToStructByName[unsettled], historyID, dispatchID)
 	if err != nil {
 		return err
 	}
-	if pending {
+	if state.Suspending {
+		return errSuspensionUnsettled
+	}
+	if state.Pending {
 		return fmt.Errorf("runtime cleanup or lifecycle work is not yet settled: %w", ErrFailedPrecondition)
 	}
 	return nil

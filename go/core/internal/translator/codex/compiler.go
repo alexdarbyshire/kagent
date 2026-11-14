@@ -15,7 +15,9 @@ import (
 	"istio.io/istio/pkg/kube/krt"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 
+	"github.com/kagent-dev/kagent/go/adk/pkg/models"
 	configv1 "github.com/kagent-dev/kagent/go/api/gen/kagent/config/v1"
 	"github.com/kagent-dev/kagent/go/api/v1alpha3"
 	"github.com/kagent-dev/kagent/go/core/internal/egress"
@@ -51,18 +53,18 @@ func NewCompiler(ctx krt.HandlerContext, collections translator.Collections, set
 }
 
 func (c *Compiler) Compile(ctx context.Context, input *translator.HarnessInput) (*translator.CompileResult, error) {
+	if err := translator.ValidateCLIExposure(input, c.settings.GetBuiltinTools().GetDisableBash()); err != nil {
+		return nil, err
+	}
 	if input == nil || input.Harness == nil || input.Root == nil || input.Root.Template == nil || input.Root.ResolvedModelConfig == nil || input.Root.ResolvedModelConfig.Config == nil {
 		return nil, fmt.Errorf("codex compiler requires a resolved Harness, AgentTemplate, and ModelConfig")
 	}
 	model := input.Root.ResolvedModelConfig.Config
-	if err := translator.ValidateCLIExposure(input, c.settings.GetSkillTools().GetDisableBash()); err != nil {
-		return nil, err
-	}
 	if strings.TrimSpace(model.Spec.Model) == "" {
 		return nil, translator.NewValidationError("Codex ModelConfig model is required")
 	}
-	if len(model.Spec.DefaultHeaders) != 0 || !model.Spec.TLS.IsEmpty() || model.Spec.APIKeyPassthrough {
-		return nil, translator.NewValidationError("Codex does not support ModelConfig defaultHeaders, TLS, or apiKeyPassthrough")
+	if len(model.Spec.DefaultHeaders) != 0 || !model.Spec.TLS.IsEmpty() || ptr.Deref(model.Spec.TokenPassthrough, false) {
+		return nil, translator.NewValidationError("Codex does not support ModelConfig defaultHeaders, TLS, or tokenPassthrough")
 	}
 	telemetryConfig, err := translator.TelemetryConfigFromSettings(c.settings.GetTelemetry())
 	if err != nil {
@@ -75,7 +77,7 @@ func (c *Compiler) Compile(ctx context.Context, input *translator.HarnessInput) 
 	runtimeTelemetry := telemetryConfig.RuntimeTelemetry(
 		tracing.RuntimeCodex, input.AgentName, template.Namespace, model.Spec)
 
-	provider, providerEnvironment, egress, err := c.compileProvider(ctx, model)
+	provider, providerEnvironment, egress, err := c.compileProvider(ctx, input.Root.ResolvedModelConfig)
 	if err != nil {
 		return nil, err
 	}
@@ -133,7 +135,7 @@ func (c *Compiler) Compile(ctx context.Context, input *translator.HarnessInput) 
 	if err != nil {
 		return nil, fmt.Errorf("build Codex revision provenance: %w", err)
 	}
-	environment, credentials, err := translator.CompileCredentials(input, nil, environment)
+	environment, credentials, tokenPassthroughTargets, err := translator.CompileCredentials(input, nil, environment)
 	if err != nil {
 		return nil, err
 	}
@@ -145,18 +147,27 @@ func (c *Compiler) Compile(ctx context.Context, input *translator.HarnessInput) 
 	egress = slices.Compact(egress)
 	return &translator.CompileResult{
 		Revision: translator.Revision{
-			Capabilities: harness.Spec.Workload.Capabilities.DeepCopy(),
-			Namespace:    template.Namespace,
-			Environment:  environment, ConfigJSON: configJSON, AgentCard: card,
-			SkillImages:    skills.Images,
+			ControlPlaneURL: c.settings.GetControlPlaneUrl(),
+			Namespace:       template.Namespace,
+			SkillImages:     skills.Images,
+			Environment:     environment, ConfigJSON: configJSON, AgentCard: card,
 			WorkerPoolName: harness.Spec.Substrate.WorkerPoolRef.Name, SnapshotLocation: harness.Spec.Substrate.SnapshotPolicy.Location,
-			Credentials: credentials, Provenance: provenance, EgressDestinations: egress,
+			TokenPassthroughTargets: tokenPassthroughTargets, Credentials: credentials, Provenance: provenance, EgressDestinations: egress,
 		},
 		Warnings: mcp.warnings,
 	}, nil
 }
 
-func (c *Compiler) compileProvider(ctx context.Context, model *v1alpha3.ModelConfig) (codexconfig.Provider, []corev1.EnvVar, []string, error) {
+func (c *Compiler) compileProvider(ctx context.Context, resolved *translator.ResolvedModelConfig) (codexconfig.Provider, []corev1.EnvVar, []string, error) {
+	model := resolved.Config
+	var credential corev1.EnvVar
+	if model.Spec.ActorJWT != nil {
+		var err error
+		credential, err = translator.ActorJWTEnvironment(resolved)
+		if err != nil {
+			return codexconfig.Provider{}, nil, nil, err
+		}
+	}
 	switch model.Spec.Provider {
 	case v1alpha3.ModelProviderOpenAI:
 		if model.Spec.OpenAI == nil || model.Spec.OpenAI.APIFormat == nil || *model.Spec.OpenAI.APIFormat != v1alpha3.OpenAIAPIFormatResponses {
@@ -168,8 +179,11 @@ func (c *Compiler) compileProvider(ctx context.Context, model *v1alpha3.ModelCon
 		if !reflect.DeepEqual(options, v1alpha3.OpenAIConfig{}) {
 			return codexconfig.Provider{}, nil, nil, translator.NewValidationError("Codex does not support OpenAI provider options beyond baseUrl and apiFormat responses")
 		}
-		if err := c.requireSecretKey(ctx, model.Namespace, model.Spec.APIKeySecret, model.Spec.APIKeySecretKey); err != nil {
-			return codexconfig.Provider{}, nil, nil, err
+		if model.Spec.ActorJWT == nil {
+			if err := c.requireSecretKey(ctx, model.Namespace, model.Spec.APIKeySecret, model.Spec.APIKeySecretKey); err != nil {
+				return codexconfig.Provider{}, nil, nil, err
+			}
+			credential = secretEnvironment(openAIAPIKeyEnv, model.Spec.APIKeySecret, model.Spec.APIKeySecretKey)
 		}
 		provider := codexconfig.Provider{Name: "openai", BaseURL: baseURL}
 		egress := []string{"https://api.openai.com:443"}
@@ -180,7 +194,7 @@ func (c *Compiler) compileProvider(ctx context.Context, model *v1alpha3.ModelCon
 			}
 			egress = []string{host}
 		}
-		return provider, []corev1.EnvVar{secretEnvironment(openAIAPIKeyEnv, model.Spec.APIKeySecret, model.Spec.APIKeySecretKey)}, egress, nil
+		return provider, []corev1.EnvVar{credential}, egress, nil
 	case v1alpha3.ModelProviderBedrock:
 		if model.Spec.Bedrock == nil || strings.TrimSpace(model.Spec.Bedrock.Region) == "" {
 			return codexconfig.Provider{}, nil, nil, translator.NewValidationError("Codex Bedrock requires bedrock.region")
@@ -218,7 +232,7 @@ func (c *Compiler) compileProvider(ctx context.Context, model *v1alpha3.ModelCon
 				environment = append(environment, secretEnvironment(awsSessionTokenEnv, secret.Name, awsSessionTokenEnv))
 			}
 		}
-		return codexconfig.Provider{Name: "amazon-bedrock"}, environment, []string{"https://bedrock-runtime." + region + ".amazonaws.com:443"}, nil
+		return codexconfig.Provider{Name: "amazon-bedrock"}, environment, []string{models.BedrockRuntimeOrigin(region) + ":443"}, nil
 	default:
 		return codexconfig.Provider{}, nil, nil, translator.NewValidationError("Codex does not support ModelConfig provider %q", model.Spec.Provider)
 	}
@@ -237,7 +251,7 @@ func compileAgents(root *translator.AgentInput) (map[string]codexconfig.Agent, e
 		if len(child.MCPTools) != 0 || len(child.Shared) != 0 || len(child.Template.Spec.Tools) != 0 || len(child.Template.Spec.Skills) != 0 || len(child.Template.Spec.Plugins) != 0 {
 			return nil, translator.NewValidationError("Codex Shared agent %q cannot contain tools, skills, plugins, or nested agents", binding.Name)
 		}
-		if !sameProviderConfiguration(root.ResolvedModelConfig.Config.Spec, child.ResolvedModelConfig.Config.Spec) {
+		if !sameProviderConfiguration(root.ResolvedModelConfig.Config.Spec, child.ResolvedModelConfig.Config.Spec) || !translator.SameModelCredentials(root.ResolvedModelConfig.Config, child.ResolvedModelConfig.Config) {
 			return nil, translator.NewValidationError("Codex Shared agent %q must use the root provider and authentication configuration", binding.Name)
 		}
 		if _, exists := agents[binding.Name]; exists {
@@ -250,6 +264,7 @@ func compileAgents(root *translator.AgentInput) (map[string]codexconfig.Agent, e
 
 func sameProviderConfiguration(root, child v1alpha3.ModelConfigSpec) bool {
 	root.Model, child.Model = "", ""
+	root.AllowedNamespaces, child.AllowedNamespaces = nil, nil
 	return reflect.DeepEqual(root, child)
 }
 
@@ -312,32 +327,32 @@ func (c *Compiler) buildProvenance(ctx context.Context, input *translator.Harnes
 			entries = append(entries, objectProvenance(v1alpha3.GroupVersion.String(), kind, name, uid, generation, value))
 		}
 	}
-	configMaps := map[string]struct{}{}
+	configMaps := map[types.NamespacedName]struct{}{}
 	var addAgent func(*translator.AgentInput)
 	addAgent = func(agent *translator.AgentInput) {
 		model := agent.ResolvedModelConfig.Config
 		if source := agent.Template.Source; source != nil {
 			addObject("AgentTemplate", source.Name, source.UID, source.Generation, agent.Template.Spec)
 		}
-		addObject("ModelConfig", model.Name, model.UID, model.Generation, model.Spec)
+		addObject("ModelConfig", model.Namespace+"/"+model.Name, model.UID, model.Generation, model.Spec)
 		if agent.Template.Spec.SystemPromptFrom != nil {
-			configMaps[agent.Template.Spec.SystemPromptFrom.Name] = struct{}{}
+			configMaps[types.NamespacedName{Namespace: input.Harness.Namespace, Name: agent.Template.Spec.SystemPromptFrom.Name}] = struct{}{}
 		}
 		if agent.Template.Spec.PromptTemplate != nil {
 			for _, source := range agent.Template.Spec.PromptTemplate.DataSources {
-				configMaps[source.Name] = struct{}{}
+				configMaps[types.NamespacedName{Namespace: input.Harness.Namespace, Name: source.Name}] = struct{}{}
 			}
 		}
 		for _, tool := range agent.MCPTools {
 			if tool.Server != nil {
-				identity := "RemoteMCPServer\x00" + tool.Server.Name
+				identity := "RemoteMCPServer\x00" + tool.Server.Namespace + "/" + tool.Server.Name
 				if _, ok := seenObjects[identity]; !ok {
 					seenObjects[identity] = struct{}{}
-					entries = append(entries, objectProvenance(v1alpha3.GroupVersion.String(), "RemoteMCPServer", tool.Server.Name, tool.Server.UID, tool.Server.Generation, tool.Server.Spec))
+					entries = append(entries, objectProvenance(v1alpha3.GroupVersion.String(), "RemoteMCPServer", tool.Server.Namespace+"/"+tool.Server.Name, tool.Server.UID, tool.Server.Generation, tool.Server.Spec))
 				}
 				for _, header := range tool.Server.Spec.HeadersFrom {
 					if header.ValueFrom != nil && header.ValueFrom.Type == v1alpha3.ConfigMapValueSource {
-						configMaps[header.ValueFrom.Name] = struct{}{}
+						configMaps[types.NamespacedName{Namespace: tool.Server.Namespace, Name: header.ValueFrom.Name}] = struct{}{}
 					}
 				}
 			}
@@ -348,31 +363,11 @@ func (c *Compiler) buildProvenance(ctx context.Context, input *translator.Harnes
 	}
 	addAgent(input.Root)
 	for name := range configMaps {
-		configMap := krt.FetchOne(c.ctx, c.collections.ConfigMaps, krt.FilterObjectName(types.NamespacedName{Namespace: input.Harness.Namespace, Name: name}))
+		configMap := krt.FetchOne(c.ctx, c.collections.ConfigMaps, krt.FilterObjectName(name))
 		if configMap == nil {
 			return nil, fmt.Errorf("ConfigMap %q not found", name)
 		}
-		entries = append(entries, objectProvenance("v1", "ConfigMap", name, (*configMap).UID, (*configMap).Generation, (*configMap).Data))
-	}
-	seenSecrets := map[string]struct{}{}
-	for _, variable := range environment {
-		if variable.ValueFrom == nil || variable.ValueFrom.SecretKeyRef == nil {
-			continue
-		}
-		ref := variable.ValueFrom.SecretKeyRef
-		identity := ref.Name + "\x00" + ref.Key
-		if _, ok := seenSecrets[identity]; ok {
-			continue
-		}
-		seenSecrets[identity] = struct{}{}
-		secret, err := c.secret(ctx, input.Harness.Namespace, ref.Name)
-		if err != nil {
-			return nil, err
-		}
-		_, ok := secret.Data[ref.Key]
-		if !ok {
-			return nil, fmt.Errorf("secret %q does not contain key %q", ref.Name, ref.Key)
-		}
+		entries = append(entries, objectProvenance("v1", "ConfigMap", name.String(), (*configMap).UID, (*configMap).Generation, (*configMap).Data))
 	}
 	slices.SortFunc(entries, func(a, b provenanceEntry) int {
 		return strings.Compare(a.APIVersion+"\x00"+a.Kind+"\x00"+a.Name+"\x00"+a.Key, b.APIVersion+"\x00"+b.Kind+"\x00"+b.Name+"\x00"+b.Key)

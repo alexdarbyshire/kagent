@@ -18,7 +18,9 @@ expose it. Neither relationship keys nor transports retain an old invocation.
 ## Authority And Calls
 
 The existing header resolution order remains propagation, allowed headers,
-dynamic provider, then static binding headers. Each call uses its original current
+dynamic provider, then static binding headers. When caller-token passthrough is
+enabled, the current caller bearer overrides Authorization last; a missing caller
+token fails the request. Each call uses its original current
 agent context. Connection-owned background traffic and termination use the
 provider references described in [managed shutdown](mcp-managed-shutdown.md).
 

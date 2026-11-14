@@ -1,4 +1,4 @@
-package mcp
+package mcp_test
 
 import (
 	"bytes"
@@ -20,6 +20,8 @@ import (
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/require"
 
+	"github.com/kagent-dev/kagent/go/adk/pkg/mcp"
+	"github.com/kagent-dev/kagent/go/adk/pkg/models"
 	"github.com/kagent-dev/kagent/go/adk/pkg/tools"
 	"github.com/kagent-dev/kagent/go/api/adk"
 )
@@ -66,7 +68,7 @@ func TestCLICommandsRetainBrowserOwnershipAcrossInvocations(t *testing.T) {
 			directory := t.TempDir()
 			file := filepath.Join(directory, "binding.json")
 			require.NoError(t, os.WriteFile(file, data, 0600))
-			executor := tools.NewCommandExecutor(tools.ExecutionConfig{PrepareEnvironment: PrepareCLIEnvironment(owner, []adk.MCPCLIConfig{binding}, false, nil)})
+			executor := tools.NewCommandExecutor(tools.ExecutionConfig{PrepareEnvironment: mcp.PrepareCLIEnvironment(owner, []adk.MCPCLIConfig{binding}, false, nil)})
 			for _, name := range []string{"create", "read", "close"} {
 				// Each execution has a new invocation socket, like separate model calls.
 				result, err := executor.ExecuteCommand(cliSessionContext{Context: t.Context(), id: "alice"}, fmt.Sprintf("%q --binding-file %q %s", binary, file, name), directory)
@@ -101,7 +103,7 @@ func TestIntegratedCLIUsesCommandFilesAndPreservesWireNumbers(t *testing.T) {
 	file := filepath.Join(directory, "binding.json")
 	require.NoError(t, os.WriteFile(file, data, 0600))
 	require.NoError(t, os.WriteFile(filepath.Join(directory, "arguments.json"), []byte(`{"body":{"text":"file","count":9007199254740993}}`), 0600))
-	executor := tools.NewCommandExecutor(tools.ExecutionConfig{PrepareEnvironment: PrepareCLIEnvironment(t.Context(), []adk.MCPCLIConfig{binding}, false, nil)})
+	executor := tools.NewCommandExecutor(tools.ExecutionConfig{PrepareEnvironment: mcp.PrepareCLIEnvironment(t.Context(), []adk.MCPCLIConfig{binding}, false, nil)})
 	base := fmt.Sprintf("%q --binding-file %q", binary, file)
 	for _, command := range []string{
 		base + " record --input-file arguments.json",
@@ -172,7 +174,7 @@ func TestIntegratedCLIReportsAmbiguousMutationWithoutReplay(t *testing.T) {
 	directory := t.TempDir()
 	file := filepath.Join(directory, "binding.json")
 	require.NoError(t, os.WriteFile(file, data, 0600))
-	executor := tools.NewCommandExecutor(tools.ExecutionConfig{PrepareEnvironment: PrepareCLIEnvironment(t.Context(), []adk.MCPCLIConfig{binding}, false, nil)})
+	executor := tools.NewCommandExecutor(tools.ExecutionConfig{PrepareEnvironment: mcp.PrepareCLIEnvironment(t.Context(), []adk.MCPCLIConfig{binding}, false, nil)})
 	command := fmt.Sprintf(`if %q --binding-file %q mutate >result.json 2>diagnostic.txt; then exit 1; else cat diagnostic.txt; fi`, binary, file)
 	result, err := executor.ExecuteCommand(cliSessionContext{Context: t.Context(), id: "alice"}, command, directory)
 	require.NoError(t, err)
@@ -208,7 +210,7 @@ func TestIntegratedCLICancellationReleasesInvocationAndDoesNotReplay(t *testing.
 	require.NoError(t, os.WriteFile(file, data, 0600))
 	owner, stopOwner := context.WithCancel(t.Context())
 	defer stopOwner()
-	prepare := PrepareCLIEnvironment(owner, []adk.MCPCLIConfig{binding}, false, nil)
+	prepare := mcp.PrepareCLIEnvironment(owner, []adk.MCPCLIConfig{binding}, false, nil)
 	opened := make(chan string, 1)
 	executor := tools.NewCommandExecutor(tools.ExecutionConfig{PrepareEnvironment: func(invocation, lifetime context.Context) ([]string, func(), error) {
 		environment, cleanup, err := prepare(invocation, lifetime)
@@ -275,7 +277,7 @@ func TestIntegratedCLICancellationStopsIncompleteInitialization(t *testing.T) {
 	require.NoError(t, os.WriteFile(file, data, 0600))
 	owner, stopOwner := context.WithCancel(t.Context())
 	defer stopOwner()
-	executor := tools.NewCommandExecutor(tools.ExecutionConfig{PrepareEnvironment: PrepareCLIEnvironment(owner, []adk.MCPCLIConfig{binding}, false, nil)})
+	executor := tools.NewCommandExecutor(tools.ExecutionConfig{PrepareEnvironment: mcp.PrepareCLIEnvironment(owner, []adk.MCPCLIConfig{binding}, false, nil)})
 	invocation, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	done := make(chan error, 1)
@@ -300,4 +302,132 @@ func TestIntegratedCLICancellationStopsIncompleteInitialization(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("canceled initialization stayed alive until actor shutdown")
 	}
+}
+
+func TestCLICommandPassthroughUsesCurrentCallerAndRejectsMissingToken(t *testing.T) {
+	binary := filepath.Join(t.TempDir(), "mcp-cli")
+	output, err := exec.Command("go", "build", "-o", binary, "../../cmd/mcp-cli").CombinedOutput()
+	require.NoError(t, err, "%s", output)
+	server := mcpsdk.NewServer(&mcpsdk.Implementation{Name: "passthrough", Version: "1"}, nil)
+	server.AddTool(&mcpsdk.Tool{Name: "echo", InputSchema: json.RawMessage(`{"type":"object"}`)}, func(context.Context, *mcpsdk.CallToolRequest) (*mcpsdk.CallToolResult, error) {
+		return &mcpsdk.CallToolResult{}, nil
+	})
+	var mu sync.Mutex
+	var seen []string
+	handler := mcpsdk.NewStreamableHTTPHandler(func(*http.Request) *mcpsdk.Server { return server }, nil)
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seen = append(seen, r.Header.Get("Authorization"))
+		mu.Unlock()
+		handler.ServeHTTP(w, r)
+	}))
+	defer remote.Close()
+	defer remote.CloseClientConnections()
+	binding := adk.MCPCLIConfig{Name: "passthrough", RequiresInvocationHeaders: true, HTTP: adk.HttpMcpServerConfig{TokenPassthrough: true, Params: adk.StreamableHTTPConnectionParams{Url: remote.URL}}}
+	directory := t.TempDir()
+	file := filepath.Join(directory, "binding.json")
+	data, err := json.Marshal(binding)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(file, data, 0600))
+	owner, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	executor := tools.NewCommandExecutor(tools.ExecutionConfig{PrepareEnvironment: mcp.PrepareCLIEnvironment(owner, []adk.MCPCLIConfig{binding}, false, nil)})
+	for _, token := range []string{"", "alice", "bob"} {
+		mu.Lock()
+		seen = nil
+		mu.Unlock()
+		ctx := owner
+		if token != "" {
+			ctx = context.WithValue(ctx, models.BearerTokenKey, token)
+		}
+		_, err := executor.ExecuteCommand(cliSessionContext{Context: ctx, id: "same-session"}, fmt.Sprintf("%q --binding-file %q --help", binary, file), directory)
+		if token == "" {
+			require.Error(t, err)
+		} else {
+			require.NoError(t, err)
+		}
+		mu.Lock()
+		if token == "" {
+			require.Empty(t, seen)
+		} else {
+			require.NotEmpty(t, seen)
+			for _, auth := range seen {
+				require.Equal(t, "Bearer "+token, auth)
+			}
+		}
+		mu.Unlock()
+	}
+}
+
+func TestRetainedCLIRefreshesModernCacheableCatalog(t *testing.T) {
+	binary := filepath.Join(t.TempDir(), "mcp-cli")
+	output, err := exec.Command("go", "build", "-o", binary, "../../cmd/mcp-cli").CombinedOutput()
+	require.NoError(t, err, "%s", output)
+	var initialized, catalogs, calls atomic.Int32
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		var request struct {
+			ID     json.RawMessage `json:"id"`
+			Method string          `json:"method"`
+			Params struct {
+				Arguments json.RawMessage `json:"arguments"`
+			} `json:"params"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Error(err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if len(request.ID) == 0 {
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+		var result string
+		switch request.Method {
+		case "server/discover":
+			initialized.Add(1)
+			result = `{"supportedVersions":["2026-07-28"],"capabilities":{"tools":{}}}`
+		case "tools/list":
+			version := catalogs.Add(1)
+			result = fmt.Sprintf(`{"ttlMs":60000,"cacheScope":"private","tools":[{"name":"record","inputSchema":{"type":"object","description":"catalog-%d","properties":{"count":{"type":"integer","enum":[9007199254740993]}},"required":["count"],"additionalProperties":false}}]}`, version)
+		case "tools/call":
+			calls.Add(1)
+			require.Contains(t, string(request.Params.Arguments), "9007199254740993")
+			result = `{"content":[],"structuredContent":{"count":9007199254740993}}`
+		default:
+			t.Errorf("unexpected method %q", request.Method)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%s,"result":%s}`, request.ID, result)
+	}))
+	defer remote.Close()
+	binding := adk.MCPCLIConfig{Name: "cacheable", HTTP: adk.HttpMcpServerConfig{Params: adk.StreamableHTTPConnectionParams{Url: remote.URL}}}
+	data, err := json.Marshal(binding)
+	require.NoError(t, err)
+	directory := t.TempDir()
+	file := filepath.Join(directory, "binding.json")
+	require.NoError(t, os.WriteFile(file, data, 0600))
+	executor := tools.NewCommandExecutor(tools.ExecutionConfig{PrepareEnvironment: mcp.PrepareCLIEnvironment(t.Context(), []adk.MCPCLIConfig{binding}, false, nil)})
+	base := fmt.Sprintf("%q --binding-file %q record", binary, file)
+	for version := 1; version <= 2; version++ {
+		result, err := executor.ExecuteCommand(cliSessionContext{Context: t.Context(), id: "alice"}, base+" --help schema", directory)
+		require.NoError(t, err, "%s", result)
+		require.Contains(t, result, fmt.Sprintf("catalog-%d", version))
+		require.Contains(t, result, "9007199254740993")
+	}
+	_, err = executor.ExecuteCommand(cliSessionContext{Context: t.Context(), id: "alice"}, base+" --count 9007199254740992", directory)
+	require.Error(t, err, "validation must retain the exact wire enum")
+	for range 2 {
+		result, err := executor.ExecuteCommand(cliSessionContext{Context: t.Context(), id: "alice"}, base+" --count 9007199254740993", directory)
+		require.NoError(t, err, "%s", result)
+		require.Contains(t, result, "9007199254740993")
+	}
+	require.EqualValues(t, 1, initialized.Load(), "refreshing catalogs must retain the negotiated SDK connection")
+	require.EqualValues(t, 5, catalogs.Load(), "each command must discover its current wire catalog")
+	require.EqualValues(t, 2, calls.Load(), "help and invalid arguments must not dispatch")
 }

@@ -3,8 +3,8 @@ package controller
 import (
 	"testing"
 
-	atev1alpha1 "github.com/agent-substrate/substrate/pkg/api/v1alpha1"
 	"github.com/stretchr/testify/require"
+	atev1alpha1 "go.ate.dev/substrate/api/infra/k8s/ate/v1"
 	"google.golang.org/protobuf/encoding/protojson"
 	"istio.io/istio/pkg/kube/krt"
 	"istio.io/istio/pkg/kube/krt/krttest"
@@ -25,7 +25,7 @@ func TestMCPCLIPreparationWithoutImageRegistration(t *testing.T) {
 		Substrate: v1alpha3.RuntimeSubstratePolicy{WorkerPoolRef: corev1.LocalObjectReference{Name: "default"}},
 	}}
 	a := &v1alpha3.AgentTemplate{ObjectMeta: metav1.ObjectMeta{Namespace: "test", Name: "agent"}, Spec: v1alpha3.AgentTemplateSpec{
-		ModelConfig: &corev1.LocalObjectReference{Name: "model"}, Tools: []v1alpha3.ToolBinding{{MCP: &v1alpha3.MCPToolBinding{Server: corev1.TypedLocalObjectReference{Kind: "RemoteMCPServer", Name: "browser"}, ExposeAsCLI: new(true)}}},
+		ModelConfig: &v1alpha3.ModelConfigReference{Name: "model"}, Tools: []v1alpha3.ToolBinding{{MCP: &v1alpha3.MCPToolBinding{Server: v1alpha3.MCPServerReference{Kind: new("RemoteMCPServer"), Name: "browser"}, ExposeAsCLI: new(true)}}},
 	}}
 	mock := krttest.NewMock(t, []any{h, &v1alpha3.ModelConfig{ObjectMeta: metav1.ObjectMeta{Namespace: "test", Name: "model"}, Spec: v1alpha3.ModelConfigSpec{Provider: v1alpha3.ModelProviderOpenAI, Model: "fixture"}},
 		&v1alpha3.RemoteMCPServer{ObjectMeta: metav1.ObjectMeta{Namespace: "test", Name: "browser"}, Spec: v1alpha3.RemoteMCPServerSpec{URL: "http://browser.example/mcp"}},

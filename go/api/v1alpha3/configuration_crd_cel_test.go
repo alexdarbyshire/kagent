@@ -26,6 +26,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -52,11 +53,12 @@ func TestConfigurationCRDValidation(t *testing.T) {
 		require.NoError(t, err)
 		var names []string
 		for _, resource := range resources.APIResources {
+			require.NotEqual(t, "harnesses/status", resource.Name, "Harness must not expose a status subresource")
 			if !strings.Contains(resource.Name, "/") {
 				names = append(names, resource.Name)
 			}
 		}
-		require.ElementsMatch(t, []string{"agents", "agenttemplates", "harnesses", "modelconfigs", "modelproviderconfigs", "remotemcpservers", "sandboxtemplates"}, names)
+		require.ElementsMatch(t, []string{"agents", "agenttemplates", "egresspolicies", "harnesses", "modelconfigs", "modelproviderconfigs", "remotemcpservers", "sandboxtemplates"}, names)
 		_, err = discoveryClient.ServerResourcesForGroupVersion("kagent.dev/v1alpha3")
 		require.True(t, apierrors.IsNotFound(err), "the new CRDs must not publish the legacy group: %v", err)
 	})
@@ -71,18 +73,93 @@ func TestConfigurationCRDValidation(t *testing.T) {
 	const namespace = "configuration-crd-cel"
 	require.NoError(t, cl.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: namespace}}))
 
-	t.Run("Harness retains exact bootstrap capabilities", func(t *testing.T) {
-		capabilities := &corev1.Capabilities{
-			Drop: []corev1.Capability{"ALL"},
-			Add:  []corev1.Capability{"CHOWN", "SETUID", "SETGID", "NET_BIND_SERVICE"},
-		}
-		harness := validHarness(namespace, "bootstrap-capabilities", HarnessSpec{
-			Kagent: &KagentHarness{}, Workload: HarnessWorkload{Capabilities: capabilities},
+	for _, scenario := range []struct {
+		validation string
+		options    []ctrlclient.CreateOption
+	}{
+		{validation: "default"},
+		{validation: "strict", options: []ctrlclient.CreateOption{ctrlclient.FieldValidation("Strict")}},
+	} {
+		t.Run("Given references as a v1.0.x Go client encodes them, when they are created with "+scenario.validation+" field validation, assert that they are admitted unchanged", func(t *testing.T) {
+			// corev1.TypedObjectReference encodes an unset apiGroup as null.
+			template := jsonObject(t, namespace, `{"apiVersion":"api.kagent.dev/v1alpha3","kind":"AgentTemplate","metadata":{"generateName":"v1-refs-"},"spec":{
+				"modelConfig":{"name":"model"},
+				"tools":[{"mcp":{"server":{"apiGroup":null,"kind":"RemoteMCPServer","name":"tools","namespace":""}}}]}}`)
+			require.NoError(t, cl.Create(ctx, template, scenario.options...))
+
+			storedTemplate := &AgentTemplate{}
+			require.NoError(t, cl.Get(ctx, ctrlclient.ObjectKeyFromObject(template), storedTemplate))
+			require.Equal(t, &ModelConfigReference{Name: "model"}, storedTemplate.Spec.ModelConfig)
+			require.Equal(t, MCPServerReference{Kind: new("RemoteMCPServer"), Name: "tools"}, storedTemplate.Spec.Tools[0].MCP.Server)
 		})
-		require.NoError(t, cl.Create(ctx, harness, &ctrlclient.CreateOptions{FieldValidation: metav1.FieldValidationStrict}))
-		var stored Harness
-		require.NoError(t, cl.Get(ctx, ctrlclient.ObjectKeyFromObject(harness), &stored))
-		require.Equal(t, capabilities, stored.Spec.Workload.Capabilities)
+	}
+	t.Run("Given an MCP server reference without kind, when it is created, assert that the stored reference names RemoteMCPServer", func(t *testing.T) {
+		// v1.0.x required kind, so a v1.0.x CRD or Go client needs it on every stored reference.
+		for _, ref := range []MCPServerReference{{Name: "tools"}, {Group: new("api.kagent.dev"), Name: "tools"}} {
+			template := &AgentTemplate{ObjectMeta: metav1.ObjectMeta{GenerateName: "kindless-mcp-ref-", Namespace: namespace}, Spec: AgentTemplateSpec{
+				Tools: []ToolBinding{{MCP: &MCPToolBinding{Server: ref}}},
+			}}
+			require.NoError(t, cl.Create(ctx, template))
+			stored := &AgentTemplate{}
+			require.NoError(t, cl.Get(ctx, ctrlclient.ObjectKeyFromObject(template), stored))
+			want := ref
+			want.Kind = new("RemoteMCPServer")
+			require.Equal(t, want, stored.Spec.Tools[0].MCP.Server)
+		}
+	})
+	t.Run("Given an MCP server reference to another group, when it omits kind or names RemoteMCPServer, assert that admission rejects it", func(t *testing.T) {
+		// The kind default must not admit a group/kind pair that can never resolve.
+		for _, ref := range []MCPServerReference{{Group: new("example.com"), Name: "tools"}, {Group: new("example.com"), Kind: new("RemoteMCPServer"), Name: "tools"}} {
+			template := &AgentTemplate{ObjectMeta: metav1.ObjectMeta{GenerateName: "foreign-group-mcp-ref-", Namespace: namespace}, Spec: AgentTemplateSpec{
+				Tools: []ToolBinding{{MCP: &MCPToolBinding{Server: ref}}},
+			}}
+			err := cl.Create(ctx, template)
+			require.True(t, apierrors.IsInvalid(err), "want Invalid, got %v", err)
+			require.ErrorContains(t, err, "a group other than api.kagent.dev requires its own kind")
+		}
+	})
+	t.Run("Given a model reference to another group, when it omits kind or names ModelConfig, assert that admission rejects it", func(t *testing.T) {
+		for _, ref := range []ModelConfigReference{{Group: new("example.com"), Name: "model"}, {Group: new("example.com"), Kind: new("ModelConfig"), Name: "model"}} {
+			template := &AgentTemplate{ObjectMeta: metav1.ObjectMeta{GenerateName: "foreign-group-model-ref-", Namespace: namespace}, Spec: AgentTemplateSpec{ModelConfig: &ref}}
+			err := cl.Create(ctx, template)
+			require.True(t, apierrors.IsInvalid(err), "want Invalid, got %v", err)
+			require.ErrorContains(t, err, "a group other than api.kagent.dev requires its own kind")
+		}
+	})
+	t.Run("model discovery configuration", func(t *testing.T) { testModelDiscoveryValidation(t, cl, namespace) })
+	t.Run("Actor JWT credentials", func(t *testing.T) { testActorJWTValidation(t, cl, namespace) })
+	t.Run("cross namespace references survive admission", func(t *testing.T) {
+		for _, ref := range []ModelConfigReference{{Name: "model"}, {Name: "model", Namespace: namespace}, {Name: "model", Namespace: "shared"}, {Group: new("api.kagent.dev"), Name: "model"}, {Group: new("example.com"), Kind: new("Model"), Name: "model"}} {
+			template := &AgentTemplate{ObjectMeta: metav1.ObjectMeta{GenerateName: "shared-", Namespace: namespace}, Spec: AgentTemplateSpec{
+				ModelConfig: &ref,
+				Tools:       []ToolBinding{{MCP: &MCPToolBinding{Server: MCPServerReference{Kind: new("RemoteMCPServer"), Name: "tools", Namespace: ref.Namespace}}}},
+			}}
+			require.NoError(t, cl.Create(ctx, template))
+			stored := &AgentTemplate{}
+			require.NoError(t, cl.Get(ctx, ctrlclient.ObjectKeyFromObject(template), stored))
+			require.Equal(t, ref, *stored.Spec.ModelConfig)
+			require.Equal(t, ref.Namespace, stored.Spec.Tools[0].MCP.Server.Namespace)
+		}
+		for _, ref := range []ModelConfigReference{{Name: "shared/model"}, {Name: "model", Namespace: "bad/namespace"}, {Name: "model", Namespace: "Uppercase"}, {Name: "bad..name"}} {
+			template := &AgentTemplate{ObjectMeta: metav1.ObjectMeta{GenerateName: "invalid-ref-", Namespace: namespace}, Spec: AgentTemplateSpec{ModelConfig: &ref}}
+			require.True(t, apierrors.IsInvalid(cl.Create(ctx, template)), "invalid reference: %+v", ref)
+		}
+		for _, ref := range []MCPServerReference{
+			{Kind: new("RemoteMCPServer"), Name: ""},
+			{Kind: new("RemoteMCPServer"), Name: strings.Repeat("a", 254)},
+			{Kind: new("RemoteMCPServer"), Name: "tools", Namespace: strings.Repeat("a", 64)},
+			{APIGroup: new("api.kagent.dev"), Kind: new("RemoteMCPServer"), Name: "tools"},
+		} {
+			template := &AgentTemplate{ObjectMeta: metav1.ObjectMeta{GenerateName: "invalid-mcp-ref-", Namespace: namespace}, Spec: AgentTemplateSpec{
+				Tools: []ToolBinding{{MCP: &MCPToolBinding{Server: ref}}},
+			}}
+			require.True(t, apierrors.IsInvalid(cl.Create(ctx, template)), "invalid MCP reference: %+v", ref)
+		}
+		model := &ModelConfig{ObjectMeta: metav1.ObjectMeta{GenerateName: "shared-", Namespace: namespace}, Spec: ModelConfigSpec{Provider: ModelProviderOpenAI, Model: "example", AllowedNamespaces: &AllowedNamespaces{From: NamespacesFromAll}}}
+		require.NoError(t, cl.Create(ctx, model))
+		stored := &ModelConfig{}
+		require.NoError(t, cl.Get(ctx, ctrlclient.ObjectKeyFromObject(model), stored))
+		require.Equal(t, NamespacesFromAll, stored.Spec.AllowedNamespaces.From)
 	})
 
 	t.Run("MCP timeout bounds", func(t *testing.T) {
@@ -103,6 +180,34 @@ func TestConfigurationCRDValidation(t *testing.T) {
 					require.NoError(t, err)
 				}
 			}
+		}
+	})
+
+	t.Run("MCP token passthrough owns Authorization", func(t *testing.T) {
+		for _, test := range []struct {
+			name        string
+			passthrough bool
+			header      string
+			wantReject  bool
+		}{
+			{"passthrough without headers", true, "", false},
+			{"passthrough with other header", true, "X-Tenant", false},
+			{"passthrough with Authorization", true, "authorization", true},
+			{"static Authorization without passthrough", false, "Authorization", false},
+		} {
+			t.Run(test.name, func(t *testing.T) {
+				server := &RemoteMCPServer{ObjectMeta: metav1.ObjectMeta{GenerateName: "mcp-passthrough-", Namespace: namespace},
+					Spec: RemoteMCPServerSpec{URL: "https://mcp.example.com", TokenPassthrough: new(test.passthrough)}}
+				if test.header != "" {
+					server.Spec.HeadersFrom = []ValueRef{{Name: test.header, Value: "value"}}
+				}
+				err := cl.Create(ctx, server)
+				if test.wantReject {
+					require.ErrorContains(t, err, "headersFrom cannot set Authorization when tokenPassthrough is enabled")
+				} else {
+					require.NoError(t, err)
+				}
+			})
 		}
 	})
 
@@ -142,6 +247,22 @@ func TestConfigurationCRDValidation(t *testing.T) {
 					}
 				})
 			}
+		}
+	})
+
+	t.Run("Harness rejects empty workload command and args", func(t *testing.T) {
+		for _, field := range []string{"command", "args"} {
+			t.Run(field, func(t *testing.T) {
+				harness := validHarness(namespace, "empty-"+field, HarnessSpec{Kagent: &KagentHarness{}})
+				harness.SetGroupVersionKind(GroupVersion.WithKind("Harness"))
+				data, err := json.Marshal(harness)
+				require.NoError(t, err)
+				object := &unstructured.Unstructured{}
+				require.NoError(t, object.UnmarshalJSON(data))
+				require.NoError(t, unstructured.SetNestedStringSlice(object.Object, []string{}, "spec", "workload", field))
+				err = cl.Create(ctx, object)
+				require.ErrorContains(t, err, "spec.workload."+field+" in body should have at least 1 items")
+			})
 		}
 	})
 
@@ -213,13 +334,13 @@ func TestConfigurationCRDValidation(t *testing.T) {
 			object: validHarness(namespace, "harness-empty-memory-model", HarnessSpec{
 				Kagent: &KagentHarness{Memory: &KagentHarnessMemory{}},
 			}),
-			wantReject: "modelConfigRef name must not be empty",
+			wantReject: "spec.kagent.memory.modelConfigRef.name",
 		},
 		{
 			name: "valid kagent memory Harness",
 			object: validHarness(namespace, "valid-memory-harness", HarnessSpec{
 				Kagent: &KagentHarness{Memory: &KagentHarnessMemory{
-					ModelConfigRef: corev1.LocalObjectReference{Name: "embedding-model"}, TTLDays: 7,
+					ModelConfigRef: ModelConfigReference{Name: "embedding-model"}, TTLDays: 7,
 				}},
 			}),
 		},
@@ -245,6 +366,29 @@ func TestConfigurationCRDValidation(t *testing.T) {
 			wantReject: "BYO harnesses must specify workload.command",
 		},
 		{
+			name: "Claude Harness rejects workload command",
+			object: validHarness(namespace, "claude-command", HarnessSpec{
+				Claude:   &ClaudeHarness{},
+				Workload: HarnessWorkload{Command: []string{"/bin/sh"}},
+			}),
+			wantReject: "Claude harnesses do not support workload.command or workload.args",
+		},
+		{
+			name: "Codex Harness rejects workload args",
+			object: validHarness(namespace, "codex-args", HarnessSpec{
+				Codex:    &CodexHarness{},
+				Workload: HarnessWorkload{Args: []string{"--flag"}},
+			}),
+			wantReject: "Codex harnesses do not support workload.command or workload.args",
+		},
+		{
+			name: "valid kagent Harness with workload command",
+			object: validHarness(namespace, "kagent-command", HarnessSpec{
+				Kagent:   &KagentHarness{},
+				Workload: HarnessWorkload{Command: []string{"/agent"}, Args: []string{"serve"}},
+			}),
+		},
+		{
 			name:       "AgentTemplate tool requires one source",
 			object:     validAgentTemplate(namespace, "template-empty-tool", []ToolBinding{{}}),
 			wantReject: "exactly one of the fields in [mcp subAgent] must be set",
@@ -253,7 +397,7 @@ func TestConfigurationCRDValidation(t *testing.T) {
 			name: "AgentTemplate tool rejects two sources",
 			object: validAgentTemplate(namespace, "template-two-tools", []ToolBinding{{
 				MCP: &MCPToolBinding{
-					Server: corev1.TypedLocalObjectReference{Kind: "RemoteMCPServer", Name: "tools"},
+					Server: MCPServerReference{Kind: new("RemoteMCPServer"), Name: "tools"},
 					Tools:  []string{"search"},
 				},
 				SubAgent: &SubAgentToolBinding{
@@ -280,16 +424,32 @@ func TestConfigurationCRDValidation(t *testing.T) {
 			name: "AgentTemplate rejects empty ModelConfig reference",
 			object: &AgentTemplate{
 				ObjectMeta: metav1.ObjectMeta{Name: "empty-model-reference", Namespace: namespace},
-				Spec:       AgentTemplateSpec{ModelConfig: &corev1.LocalObjectReference{}},
+				Spec:       AgentTemplateSpec{ModelConfig: &ModelConfigReference{}},
 			},
-			wantReject: "name must not be empty",
+			wantReject: "spec.modelConfig.name",
 		},
 		{
-			name: "AgentTemplate rejects unsupported MCP server kind",
-			object: validAgentTemplate(namespace, "unsupported-mcp-kind", []ToolBinding{{
-				MCP: &MCPToolBinding{Server: corev1.TypedLocalObjectReference{Kind: "Service", Name: "tools"}},
+			name:       "AgentTemplate rejects outputSchemaStrict true without a schema",
+			object:     unstructuredStrictTemplate(namespace, "strict-true-no-schema", true, nil, nil),
+			wantReject: "outputSchemaStrict requires outputSchema or outputSchemaFrom",
+		},
+		{
+			name:   "AgentTemplate accepts outputSchemaStrict false without a schema",
+			object: unstructuredStrictTemplate(namespace, "strict-false-no-schema", false, nil, nil),
+		},
+		{
+			name:   "AgentTemplate accepts outputSchemaStrict false with outputSchema",
+			object: unstructuredStrictTemplate(namespace, "strict-false-schema", false, &apiextensionsv1.JSON{Raw: []byte(`{"type":"object"}`)}, nil),
+		},
+		{
+			name:   "AgentTemplate accepts outputSchemaStrict true with outputSchemaFrom",
+			object: unstructuredStrictTemplate(namespace, "strict-true-schema-from", true, nil, &ConfigMapKeyReference{Name: "schemas", Key: "output.json"}),
+		},
+		{
+			name: "AgentTemplate admits other MCP server kinds for the controller to reject",
+			object: validAgentTemplate(namespace, "other-mcp-kind", []ToolBinding{{
+				MCP: &MCPToolBinding{Server: MCPServerReference{Group: new("example.com"), Kind: new("Service"), Name: "tools"}},
 			}}),
-			wantReject: "kind must be RemoteMCPServer",
 		},
 		{
 			name: "Harness compaction requires a strategy",
@@ -320,16 +480,16 @@ func TestConfigurationCRDValidation(t *testing.T) {
 		{
 			name: "Harness rejects empty summarizer ModelConfig reference",
 			object: compactionHarness(namespace, "compaction-empty-summarizer-model", KagentHarnessCompaction{
-				CompactionInterval: new(5), Summarizer: &KagentHarnessSummarizer{ModelConfigRef: &corev1.LocalObjectReference{}},
+				CompactionInterval: new(5), Summarizer: &KagentHarnessSummarizer{ModelConfigRef: &ModelConfigReference{}},
 			}),
-			wantReject: "name must not be empty",
+			wantReject: "spec.kagent.compaction.summarizer.modelConfigRef.name",
 		},
 		{
 			name: "valid Harness compaction",
 			object: compactionHarness(namespace, "compaction-valid", KagentHarnessCompaction{
 				CompactionInterval: new(5), OverlapSize: new(2), TokenThreshold: new(50000), EventRetentionSize: new(10),
 				Summarizer: &KagentHarnessSummarizer{
-					ModelConfigRef: &corev1.LocalObjectReference{Name: "summarizer"}, PromptTemplate: "Summarize.\n\n{conversation_history}",
+					ModelConfigRef: &ModelConfigReference{Name: "summarizer"}, PromptTemplate: "Summarize.\n\n{conversation_history}",
 				},
 			}),
 		},
@@ -476,6 +636,9 @@ func TestConfigurationCRDValidation(t *testing.T) {
 		})
 	}
 
+	t.Run("egress policies", func(t *testing.T) { testEgressPolicyValidation(t, cl, namespace) })
+	t.Run("MCP credential headers", func(t *testing.T) { testMCPCredentialHeaderValidation(t, cl, namespace) })
+
 	t.Run("literal runtime environment", func(t *testing.T) {
 		harness := validHarness(namespace, "env-harness", HarnessSpec{Kagent: &KagentHarness{}})
 		for _, resource := range []struct {
@@ -551,10 +714,36 @@ func validAgentTemplate(namespace, name string, tools []ToolBinding) *AgentTempl
 	return &AgentTemplate{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
 		Spec: AgentTemplateSpec{
-			ModelConfig: &corev1.LocalObjectReference{Name: "default"},
+			ModelConfig: &ModelConfigReference{Name: "default"},
 			Tools:       tools,
 		},
 	}
+}
+
+func unstructuredStrictTemplate(namespace, name string, strict bool, schema *apiextensionsv1.JSON, schemaFrom *ConfigMapKeyReference) ctrlclient.Object {
+	template := validAgentTemplate(namespace, name, nil)
+	template.Spec.OutputSchema = schema
+	template.Spec.OutputSchemaFrom = schemaFrom
+	data, err := runtime.DefaultUnstructuredConverter.ToUnstructured(template)
+	if err != nil {
+		panic(err)
+	}
+	object := &unstructured.Unstructured{Object: data}
+	object.SetAPIVersion(GroupVersion.String())
+	object.SetKind("AgentTemplate")
+	if err := unstructured.SetNestedField(data, strict, "spec", "outputSchemaStrict"); err != nil {
+		panic(err)
+	}
+	return object
+}
+
+// jsonObject keeps fields the Go types no longer have, so they still reach the API server.
+func jsonObject(t *testing.T, namespace, raw string) *unstructured.Unstructured {
+	t.Helper()
+	object := &unstructured.Unstructured{}
+	require.NoError(t, object.UnmarshalJSON([]byte(raw)))
+	object.SetNamespace(namespace)
+	return object
 }
 
 func compactionHarness(namespace, name string, compaction KagentHarnessCompaction) *Harness {

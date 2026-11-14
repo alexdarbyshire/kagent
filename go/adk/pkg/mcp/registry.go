@@ -21,6 +21,7 @@ import (
 
 	"github.com/kagent-dev/kagent/go/adk/pkg/auth"
 	"github.com/kagent-dev/kagent/go/adk/pkg/constants"
+	"github.com/kagent-dev/kagent/go/adk/pkg/models"
 	configv1 "github.com/kagent-dev/kagent/go/api/gen/kagent/config/v1"
 	"github.com/kagent-dev/kagent/go/pkg/logging"
 )
@@ -72,15 +73,15 @@ func allowedRequestHeaders(ctx context.Context, allowed []string) map[string]str
 // mcpServerParams groups connection parameters for an MCP server,
 // reducing parameter sprawl across createTransport / initializeToolSet.
 type mcpServerParams struct {
-	HTTPTransport         *http.Transport  `json:"-"` // optional caller-owned pool for bounded command lifetimes
-	Lifecycle             *ClientLifecycle `json:"-"`
-	BindingID             string
-	relationship          *clientRelationship
 	URL                   string
 	Headers               map[string]string
 	AllowedHeaders        []string              // header names to forward from incoming request
 	PropagateToken        bool                  // when true, Authorization is forwarded independently of AllowedHeaders
+	TokenPassthrough      bool                  // when true, Authorization is always the caller's bearer token
 	HeaderProvider        DynamicHeaderProvider `json:"-"` // optional per-request headers derived from invocation context (e.g., STS exchanged access tokens)
+	Lifecycle             *ClientLifecycle      `json:"-"`
+	relationship          *clientRelationship   `json:"-"`
+	HTTPTransport         *http.Transport       `json:"-"`
 	ServerType            string                // "http" or "sse"
 	Command               string
 	Args                  []string
@@ -113,14 +114,11 @@ func CreateToolsets(
 	headerProvider DynamicHeaderProvider,
 	lifecycles ...*ClientLifecycle,
 ) []tool.Toolset {
+	log := logging.FromContext(ctx)
 	var owner *ClientLifecycle
 	if len(lifecycles) > 0 {
 		owner = lifecycles[0]
 	}
-	if owner == nil {
-		owner = NewClientLifecycle(ctx, nil)
-	}
-	log := logging.FromContext(ctx)
 	var toolsets []tool.Toolset
 
 	log.InfoContext(ctx, "processing stdio MCP tools", "stdio_tools_count", len(stdioTools))
@@ -142,6 +140,7 @@ func CreateToolsets(
 			Headers:               httpTool.Params.Headers,
 			AllowedHeaders:        httpTool.AllowedHeaders,
 			PropagateToken:        propagateToken,
+			TokenPassthrough:      httpTool.TokenPassthrough,
 			HeaderProvider:        headerProvider,
 			Lifecycle:             owner,
 			ServerType:            "http",
@@ -165,6 +164,7 @@ func CreateToolsets(
 			Headers:               sseTool.Params.Headers,
 			AllowedHeaders:        sseTool.AllowedHeaders,
 			PropagateToken:        propagateToken,
+			TokenPassthrough:      sseTool.TokenPassthrough,
 			HeaderProvider:        headerProvider,
 			Lifecycle:             owner,
 			ServerType:            "sse",
@@ -201,7 +201,6 @@ func addToolset(ctx context.Context, log *slog.Logger, params mcpServerParams, t
 		log.InfoContext(ctx, "adding MCP tool", "transport", label, "index", index, "url", params.URL, "tool_filter_count", "all")
 	}
 
-	params.BindingID = fmt.Sprintf("%s:%d", label, index)
 	ts, err := initializeToolSet(ctx, params, toolFilter)
 	if err != nil {
 		log.ErrorContext(ctx, "failed to fetch MCP tools", "transport", label, "error", err, "url", params.URL)
@@ -280,13 +279,14 @@ func createTransport(ctx context.Context, params mcpServerParams) (mcpsdk.Transp
 	}
 
 	var httpTransport http.RoundTripper = baseTransport
-	if len(params.Headers) > 0 || len(params.AllowedHeaders) > 0 || params.PropagateToken || params.HeaderProvider != nil {
+	if len(params.Headers) > 0 || len(params.AllowedHeaders) > 0 || params.PropagateToken || params.HeaderProvider != nil || params.TokenPassthrough {
 		httpTransport = &headerRoundTripper{
-			base:           baseTransport,
-			headers:        params.Headers,
-			allowedHeaders: params.AllowedHeaders,
-			propagateToken: params.PropagateToken,
-			headerProvider: params.HeaderProvider,
+			base:             baseTransport,
+			headers:          params.Headers,
+			allowedHeaders:   params.AllowedHeaders,
+			propagateToken:   params.PropagateToken,
+			headerProvider:   params.HeaderProvider,
+			tokenPassthrough: params.TokenPassthrough,
 		}
 	}
 
@@ -323,27 +323,35 @@ func createTransport(ctx context.Context, params mcpServerParams) (mcpsdk.Transp
 //     CallContext and forwarded unconditionally (independent of allowedHeaders).
 //  2. allowedHeaders: explicit per-header forwarding from the A2A CallContext.
 //  3. headerProvider: runtime headers derived from ADK context, such as STS tokens.
-//  4. headers: static key/value pairs configured on the MCP server spec (highest
-//     priority — always wins).
+//  4. headers: static key/value pairs configured on the MCP server spec.
+//
+// When tokenPassthrough is set, Authorization is then replaced with the
+// caller's bearer token, and requests without one fail rather than falling
+// back to a weaker credential.
 type headerRoundTripper struct {
-	base           http.RoundTripper
-	headers        map[string]string
-	allowedHeaders []string // header names (case-insensitive) to forward from A2A context
-	propagateToken bool     // when true, Authorization is forwarded independently
-	headerProvider DynamicHeaderProvider
+	base             http.RoundTripper
+	headers          map[string]string
+	allowedHeaders   []string // header names (case-insensitive) to forward from A2A context
+	propagateToken   bool     // when true, Authorization is forwarded independently
+	headerProvider   DynamicHeaderProvider
+	tokenPassthrough bool
 }
 
 func (rt *headerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	req = req.Clone(req.Context())
 	if !resolvedLifecycleHeaders(req.Context()) {
-		maps.Copy(req.Header, rt.resolveHeaders(req.Context()))
+		headers, err := rt.resolveHeaders(req.Context())
+		if err != nil {
+			return nil, err
+		}
+		maps.Copy(req.Header, headers)
 	}
 	return rt.base.RoundTrip(req)
 }
 
 // resolveHeaders is shared by native transport and the invocation-scoped CLI
 // handoff. The caller supplies the original ADK context, including SessionID.
-func (rt *headerRoundTripper) resolveHeaders(ctx context.Context) http.Header {
+func (rt *headerRoundTripper) resolveHeaders(ctx context.Context) (http.Header, error) {
 	ctx = currentInvocation(ctx)
 	headers := make(http.Header)
 
@@ -381,48 +389,37 @@ func (rt *headerRoundTripper) resolveHeaders(ctx context.Context) http.Header {
 		headers.Set(key, value)
 	}
 
-	return headers
+	if rt.tokenPassthrough {
+		token, ok := models.PassthroughToken(ctx, true)
+		if !ok {
+			return nil, fmt.Errorf("MCP token passthrough requires a caller bearer token")
+		}
+		headers.Set(constants.AuthorizationHeader, "Bearer "+token)
+	}
+	return headers, nil
 }
 
-// initializeToolSet fetches tools from an MCP server using Google ADK's
-// mcptoolset and wraps the result with any MCP App-capable tool names found
-// during classification.
+// initializeToolSet prepares a lazy MCP toolset. Neither classification nor
+// ADK discovery may connect before the runtime reports ready.
 func initializeToolSet(ctx context.Context, params mcpServerParams, toolFilter map[string]bool) (*mcpAppToolset, error) {
-	mcpTransport, err := createManagedTransport(ctx, params)
+	discovery := &mcpAppDiscovery{listedAppNames: make(map[string]bool), appToolNames: make(map[string]bool)}
+	if params.Lifecycle != nil && (params.ServerType == "http" || params.ServerType == "sse") {
+		return &mcpAppToolset{inner: &scopedNativeToolset{params: params, filter: toolFilter, discovery: discovery, binding: bindingIdentity(struct {
+			Params mcpServerParams
+			Filter map[string]bool
+		}{params, toolFilter})}, discovery: discovery}, nil
+	}
+	transport, err := createManagedTransport(ctx, params)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create transport for %s: %w", params.URL, err)
 	}
-
-	toolPredicate, appToolNames, err := agentVisibleToolFilter(ctx, params, toolFilter)
+	client := newMCPAppClient(toolFilter, discovery)
+	addNativeResultTransformer(client, ctx)
+	toolset, err := mcptoolset.New(mcptoolset.Config{Transport: transport, Client: client})
 	if err != nil {
-		logging.FromContext(ctx).ErrorContext(ctx, "failed to classify MCP tools; falling back to lazy tool discovery", "error", err, "url", params.URL)
-		appToolNames = nil
-		if len(toolFilter) > 0 {
-			allowedTools := make([]string, 0, len(toolFilter))
-			for name, enabled := range toolFilter {
-				if enabled {
-					allowedTools = append(allowedTools, name)
-				}
-			}
-			toolPredicate = tool.StringPredicate(allowedTools)
-		} else {
-			toolPredicate = nil
-		}
+		return nil, fmt.Errorf("failed to create MCP toolset for %s: %w", params.URL, err)
 	}
-
-	if params.Lifecycle != nil && (params.ServerType == "http" || params.ServerType == "sse") {
-		return &mcpAppToolset{inner: &scopedNativeToolset{params: params, predicate: toolPredicate, binding: bindingIdentity(struct {
-			Params mcpServerParams
-			Filter map[string]bool
-		}{params, toolFilter})}, appToolNames: appToolNames}, nil
-	}
-	toolset, err := mcptoolset.New(mcptoolset.Config{Transport: mcpTransport, Client: nativeResultClient(ctx)})
-	if err != nil {
-		return nil, err
-	}
-	visibleTools := tool.Toolset(toolset)
-	if toolPredicate != nil {
-		visibleTools = tool.FilterToolset(toolset, toolPredicate)
-	}
-	return &mcpAppToolset{inner: &nativeInvocationToolset{inner: visibleTools}, appToolNames: appToolNames}, nil
+	wrapped := &nativeInvocationToolset{inner: toolset}
+	context.AfterFunc(ctx, func() { _ = wrapped.Close() })
+	return &mcpAppToolset{inner: wrapped, discovery: discovery}, nil
 }

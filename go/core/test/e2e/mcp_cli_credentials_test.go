@@ -108,7 +108,7 @@ func TestMCPCLICredentialRouting(t *testing.T) {
 				arguments, err := json.Marshal(map[string]string{"command": server.Name + " --help && " + server.Name + " add_numbers --a 3 --b 5"})
 				require.NoError(t, err)
 				call.Function.Arguments = string(arguments)
-				modelRecorder := startModelRecorder(t, startMockLLMConfig(t, config), func(body []byte) error {
+				modelRecorder := startModelRecorder(t, mockLLMProxy(t, startMockLLMConfig(t, config)), func(body []byte) error {
 					if bytes.Contains(body, []byte(credential)) {
 						return fmt.Errorf("Secret credential leaked into model input")
 					}
@@ -117,8 +117,8 @@ func TestMCPCLICredentialRouting(t *testing.T) {
 				harness := testHarness{name: "kagent", runtimeLabel: "kagent"}
 				model := harness.createModel(t, kube, reachableModelURL(t, modelRecorder.URL), nil)
 				template := &v1alpha3.AgentTemplate{ObjectMeta: metav1.ObjectMeta{GenerateName: "cli-auth-agent-", Namespace: "kagent", Labels: harness.labels()}, Spec: v1alpha3.AgentTemplateSpec{
-					ModelConfig: &corev1.LocalObjectReference{Name: model.Name}, SystemPrompt: "Use the configured CLI to add numbers.",
-					Tools: []v1alpha3.ToolBinding{{MCP: &v1alpha3.MCPToolBinding{Server: corev1.TypedLocalObjectReference{Kind: "RemoteMCPServer", Name: server.Name}, Tools: []string{"add_numbers"}, ExposeAsCLI: new(true)}}},
+					ModelConfig: &v1alpha3.ModelConfigReference{Name: model.Name}, SystemPrompt: "Use the configured CLI to add numbers.",
+					Tools: []v1alpha3.ToolBinding{{MCP: &v1alpha3.MCPToolBinding{Server: v1alpha3.MCPServerReference{Kind: new("RemoteMCPServer"), Name: server.Name}, Tools: []string{"add_numbers"}, ExposeAsCLI: new(true)}}},
 				}}
 				createAndWaitInteractionTemplateForHarness(t, kube, template, harness.name)
 				fixture := newInteractionFixtureForHarnessTemplate(t, interactionTarget(t), harness.name, template.Name)
