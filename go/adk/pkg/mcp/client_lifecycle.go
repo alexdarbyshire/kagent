@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"net/http"
 	"sync"
@@ -42,6 +43,7 @@ type ClientLifecycle struct {
 	provider      LifecycleAuthorityProvider
 	mu            sync.Mutex
 	connections   []*ownedConnection
+	nativeClosers []io.Closer
 	relationships map[relationshipKey]*clientRelationship
 	closed        bool
 	once          sync.Once
@@ -82,6 +84,8 @@ func (c *ClientLifecycle) Close() []TerminationOutcome {
 		c.closed = true
 		connections := c.connections
 		c.connections = nil
+		nativeClosers := c.nativeClosers
+		c.nativeClosers = nil
 		c.relationships = nil
 		c.mu.Unlock()
 		var wg sync.WaitGroup
@@ -93,6 +97,9 @@ func (c *ClientLifecycle) Close() []TerminationOutcome {
 			owned.transport.mu.Unlock()
 		}
 		c.stop()
+		for _, closer := range nativeClosers {
+			wg.Go(func() { _ = closer.Close() })
+		}
 		for _, owned := range connections {
 			wg.Go(func() {
 				// SDK Close cancels streams after attempting DELETE. The HTTP
@@ -114,6 +121,16 @@ func (c *ClientLifecycle) Close() []TerminationOutcome {
 		}
 	})
 	return append([]TerminationOutcome(nil), c.outcomes...)
+}
+
+func (c *ClientLifecycle) registerNative(closer io.Closer) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return false
+	}
+	c.nativeClosers = append(c.nativeClosers, closer)
+	return true
 }
 
 func (c *ClientLifecycle) register(owned *ownedConnection) bool {
@@ -177,7 +194,10 @@ func (m *managedHTTPTransport) RoundTrip(request *http.Request) (*http.Response,
 		if scoped, ok := invocation.(interface{ SessionID() string }); ok && scoped.SessionID() != "" {
 			m.capture(invocation)
 			if request.Method == http.MethodGet {
-				headers := m.resolver.resolveHeaders(invocation)
+				headers, err := m.resolver.resolveHeaders(invocation)
+				if err != nil {
+					return nil, err
+				}
 				request = request.Clone(context.WithValue(request.Context(), lifecycleHeadersKey{}, true))
 				maps.Copy(request.Header, headers)
 			} else {
@@ -242,6 +262,9 @@ func (m *managedHTTPTransport) lifecycleHeaders(ctx context.Context) (http.Heade
 	reference := m.authority
 	m.mu.Unlock()
 	headers := make(http.Header)
+	if m.resolver.tokenPassthrough {
+		return nil, errors.New("MCP lifecycle caller token unavailable")
+	}
 	var authorityErr error
 	if reference != nil {
 		var dynamic map[string]string
@@ -426,7 +449,7 @@ func createManagedTransport(ctx context.Context, params mcpServerParams) (mcpsdk
 	if err != nil {
 		return nil, err
 	}
-	resolver := &headerRoundTripper{base: params.HTTPTransport, headers: params.Headers, allowedHeaders: params.AllowedHeaders, propagateToken: params.PropagateToken, headerProvider: params.HeaderProvider}
+	resolver := &headerRoundTripper{base: params.HTTPTransport, headers: params.Headers, allowedHeaders: params.AllowedHeaders, propagateToken: params.PropagateToken, headerProvider: params.HeaderProvider, tokenPassthrough: params.TokenPassthrough}
 	return &managedTransport{inner: transport, owner: params.Lifecycle, resolver: resolver, relationship: params.relationship}, nil
 }
 

@@ -10,7 +10,6 @@ import (
 	a2atype "github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/kagent-dev/mockllm"
 	"github.com/stretchr/testify/require"
-	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -47,8 +46,8 @@ func TestMCPCLIInteraction(t *testing.T) {
 	call.Function.Arguments = string(arguments)
 	model := harness.createModel(t, kube, reachableModelURL(t, startMockLLMConfig(t, config)), nil)
 	template := &v1alpha3.AgentTemplate{ObjectMeta: metav1.ObjectMeta{GenerateName: "cli-agent-", Namespace: "kagent", Labels: harness.labels()}, Spec: v1alpha3.AgentTemplateSpec{
-		ModelConfig: &corev1.LocalObjectReference{Name: model.Name}, SystemPrompt: "Use the configured CLI command to add numbers. Discover its tool arguments with help when needed.",
-		Tools: []v1alpha3.ToolBinding{{MCP: &v1alpha3.MCPToolBinding{Server: corev1.TypedLocalObjectReference{Kind: "RemoteMCPServer", Name: server.Name}, Tools: []string{"add_numbers"}, ExposeAsCLI: new(true)}}},
+		ModelConfig: &v1alpha3.ModelConfigReference{Name: model.Name}, SystemPrompt: "Use the configured CLI command to add numbers. Discover its tool arguments with help when needed.",
+		Tools: []v1alpha3.ToolBinding{{MCP: &v1alpha3.MCPToolBinding{Server: v1alpha3.MCPServerReference{Kind: new("RemoteMCPServer"), Name: server.Name}, Tools: []string{"add_numbers"}, ExposeAsCLI: new(true)}}},
 	}}
 	createAndWaitInteractionTemplateForHarness(t, kube, template, harness.name)
 	fixture := newInteractionFixtureForHarnessTemplate(t, interactionTarget(t), harness.name, template.Name)

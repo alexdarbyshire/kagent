@@ -96,7 +96,7 @@ func TestCreateGoogleADKAgentCLIRejectsDisabledBash(t *testing.T) {
 			if shared {
 				root = &configv1.ADKAgentConfig{SubAgents: []*configv1.ADKAgentConfig{root}}
 			}
-			created, err := agent.CreateGoogleADKAgent(t.Context(), &configv1.ADKConfig{Agent: root, Runtime: &configv1.ADKRuntimeConfig{SkillTools: &configv1.SkillToolsConfig{DisableBash: true}}}, "root", nil)
+			created, err := agent.CreateGoogleADKAgent(t.Context(), &configv1.ADKConfig{Agent: root, Runtime: &configv1.ADKRuntimeConfig{BuiltinTools: &configv1.BuiltinToolsConfig{DisableBash: true}}}, "root", nil)
 			require.Nil(t, created)
 			require.ErrorContains(t, err, "disable_bash is enabled")
 		})

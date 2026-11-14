@@ -13,9 +13,6 @@ import (
 	a2atype "github.com/a2aproject/a2a-go/v2/a2a"
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/require"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/util/retry"
@@ -148,7 +145,7 @@ func TestMCPCLIRevisionLifecycle(t *testing.T) {
 		model.Spec.Stream = new(false)
 		return kube.Update(t.Context(), model)
 	}))
-	template := &v1alpha3.AgentTemplate{ObjectMeta: metav1.ObjectMeta{GenerateName: "cli-lifecycle-agent-", Namespace: "kagent", Labels: harness.labels()}, Spec: v1alpha3.AgentTemplateSpec{ModelConfig: &corev1.LocalObjectReference{Name: model.Name}, SystemPrompt: "Use the requested tool.", Tools: []v1alpha3.ToolBinding{{MCP: &v1alpha3.MCPToolBinding{Server: corev1.TypedLocalObjectReference{Kind: "RemoteMCPServer", Name: server.Name}, Tools: []string{"old_tool"}, ExposeAsCLI: new(true)}}}}}
+	template := &v1alpha3.AgentTemplate{ObjectMeta: metav1.ObjectMeta{GenerateName: "cli-lifecycle-agent-", Namespace: "kagent", Labels: harness.labels()}, Spec: v1alpha3.AgentTemplateSpec{ModelConfig: &v1alpha3.ModelConfigReference{Name: model.Name}, SystemPrompt: "Use the requested tool.", Tools: []v1alpha3.ToolBinding{{MCP: &v1alpha3.MCPToolBinding{Server: v1alpha3.MCPServerReference{Kind: new("RemoteMCPServer"), Name: server.Name}, Tools: []string{"old_tool"}, ExposeAsCLI: new(true)}}}}}
 	createAndWaitInteractionTemplateForHarness(t, kube, template, harness.name)
 	old := newInteractionFixtureForHarnessTemplate(t, interactionTarget(t), harness.name, template.Name)
 	send := func(fixture *interactionFixture, prompt string) string {
@@ -191,26 +188,14 @@ func TestMCPCLIRevisionLifecycle(t *testing.T) {
 	require.EqualValues(t, 2, calls.Load(), "rejected selection must not invoke the old tool")
 	// Catalogs remain remote and live even when a Session's binding is pinned.
 	mcp.AddTool(&mcpsdk.Tool{Name: "old_tool", Description: "LIVE_CATALOG_CHANGED", InputSchema: json.RawMessage(`{"type":"object","additionalProperties":false}`)}, recordCall)
-	// The Actor's automatic Data suspension can precede durable settlement.
-	// Retry only the public precondition while that idle operation completes.
-	require.NoError(t, wait.PollUntilContextTimeout(old.ctx, 100*time.Millisecond, time.Minute, true, func(ctx context.Context) (bool, error) {
-		response, err := old.sessions.SuspendSession(ctx, &apiv1.SuspendSessionRequest{SessionId: old.sessionID})
-		if status.Code(err) == codes.FailedPrecondition {
-			return false, nil
-		}
-		if err != nil {
-			return false, err
-		}
-		return response.GetSession().GetState() == apiv1.RuntimeState_RUNTIME_STATE_SUSPENDED, nil
-	}))
-	resumed, err := old.sessions.ResumeSession(old.ctx, &apiv1.ResumeSessionRequest{SessionId: old.sessionID})
+	// Automatic idle suspension retains the old revision and durable volume
+	// snapshot. Observing it must not wake the actor or replay completed calls.
+	assertActorSuspended(t, old)
+	suspended, err := old.sessions.GetSession(old.ctx, &apiv1.GetSessionRequest{SessionId: old.sessionID})
 	require.NoError(t, err)
-	require.Equal(t, apiv1.RuntimeState_RUNTIME_STATE_READY, resumed.GetSession().GetState())
-	require.EqualValues(t, 2, calls.Load(), "Resume must not replay either Session's completed call")
-	resumed, err = old.sessions.ResumeSession(old.ctx, &apiv1.ResumeSessionRequest{SessionId: old.sessionID})
-	require.NoError(t, err)
-	require.Equal(t, apiv1.RuntimeState_RUNTIME_STATE_READY, resumed.GetSession().GetState())
-	require.EqualValues(t, 2, calls.Load(), "repeated Resume is idempotent and must not replay calls")
+	require.Equal(t, before.GetSession().GetPreparedRevision(), suspended.GetSession().GetPreparedRevision())
+	assertActorSuspended(t, old)
+	require.EqualValues(t, 2, calls.Load(), "idle suspension and observation must not replay completed calls")
 	restored := send(old, "restored")
 	require.Contains(t, restored, "restored")
 	require.Contains(t, restored, "called:old_tool")

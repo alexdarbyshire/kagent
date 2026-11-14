@@ -1,11 +1,17 @@
 package grpcserver
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"testing"
+	"time"
 
 	a2apb "github.com/a2aproject/a2a-go/v2/a2apb/v1"
 	"github.com/google/uuid"
@@ -14,12 +20,13 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
-	apia2a "github.com/kagent-dev/kagent/go/api/a2a"
 	apiv1 "github.com/kagent-dev/kagent/go/api/gen/kagent/api/v1"
+	runtimev1 "github.com/kagent-dev/kagent/go/api/gen/kagent/runtime/v1"
 	"github.com/kagent-dev/kagent/go/core/internal/database"
+	"github.com/kagent-dev/kagent/go/core/internal/dbtest"
 	"github.com/kagent-dev/kagent/go/core/internal/service/serviceerrors"
-	"github.com/kagent-dev/kagent/go/core/internal/service/taskstore"
 	pkgauth "github.com/kagent-dev/kagent/go/core/pkg/auth"
+	"github.com/kagent-dev/kagent/go/pkg/logging"
 )
 
 const (
@@ -48,7 +55,7 @@ func (a *testAuthenticator) Authenticate(_ context.Context, headers http.Header,
 	return a.session, a.err
 }
 
-func (*testAuthenticator) UpstreamAuth(*http.Request, pkgauth.Session, pkgauth.Principal) error {
+func (*testAuthenticator) UpstreamAuth(*http.Request, pkgauth.Session, string) error {
 	return nil
 }
 
@@ -71,11 +78,11 @@ func TestAuthenticationUnaryInterceptor(t *testing.T) {
 		createMethod:           pkgauth.AccessCreate,
 		"/test.Service/Public": pkgauth.AccessPublic,
 	}
-	session := &testSession{principal: pkgauth.Principal{User: pkgauth.User{ID: "caller"}}}
+	session := &testSession{principal: pkgauth.Principal{ID: "caller"}}
 
 	t.Run("public method bypasses authentication", func(t *testing.T) {
 		called := false
-		_, err := authenticationUnaryInterceptor(nil, nil, nil, policies)(
+		_, err := authenticationUnaryInterceptor(nil, nil, policies, nil, nil)(
 			t.Context(), nil, &grpc.UnaryServerInfo{FullMethod: "/test.Service/Public"},
 			func(context.Context, any) (any, error) {
 				called = true
@@ -88,7 +95,7 @@ func TestAuthenticationUnaryInterceptor(t *testing.T) {
 	})
 
 	t.Run("unconfigured policy is denied", func(t *testing.T) {
-		_, err := authenticationUnaryInterceptor(nil, nil, nil, policies)(
+		_, err := authenticationUnaryInterceptor(nil, nil, policies, nil, nil)(
 			t.Context(), nil, &grpc.UnaryServerInfo{FullMethod: "/test.Service/Missing"},
 			func(context.Context, any) (any, error) { return nil, nil },
 		)
@@ -105,11 +112,11 @@ func TestAuthenticationUnaryInterceptor(t *testing.T) {
 			"x-agent-name", "default/agent",
 			"x-unapproved", "do-not-forward",
 		))
-		_, err := authenticationUnaryInterceptor(authenticator, nil, nil, policies)(
+		_, err := authenticationUnaryInterceptor(authenticator, nil, policies, nil, nil)(
 			ctx, nil, &grpc.UnaryServerInfo{FullMethod: readMethod},
 			func(ctx context.Context, _ any) (any, error) {
 				gotSession, ok := pkgauth.AuthSessionFrom(ctx)
-				if !ok || gotSession.Principal().User.ID != "caller" {
+				if !ok || gotSession.Principal().ID != "caller" {
 					t.Fatalf("authenticated session = %#v, %v", gotSession, ok)
 				}
 				return nil, nil
@@ -134,7 +141,7 @@ func TestAuthenticationUnaryInterceptor(t *testing.T) {
 			sessionShare: &apiv1.SessionShare{SessionId: testSessionID.String()}, ownerUserID: "owner",
 		}
 		ctx := metadata.NewIncomingContext(t.Context(), metadata.Pairs("x-share-token", "share"))
-		_, err := authenticationUnaryInterceptor(&testAuthenticator{session: session}, nil, store, policies)(
+		_, err := authenticationUnaryInterceptor(&testAuthenticator{session: session}, store, policies, nil, nil)(
 			ctx, nil, &grpc.UnaryServerInfo{FullMethod: readMethod},
 			func(ctx context.Context, _ any) (any, error) {
 				share, ok := pkgauth.ShareContextFrom(ctx)
@@ -162,7 +169,7 @@ func TestAuthenticationUnaryInterceptor(t *testing.T) {
 			sessionShare: &apiv1.SessionShare{SessionId: testSessionID.String()}, ownerUserID: "owner",
 		}
 		ctx := metadata.NewIncomingContext(t.Context(), metadata.Pairs("x-share-token", "share"))
-		_, err := authenticationUnaryInterceptor(&testAuthenticator{session: session}, nil, store, policies)(
+		_, err := authenticationUnaryInterceptor(&testAuthenticator{session: session}, store, policies, nil, nil)(
 			ctx, nil, &grpc.UnaryServerInfo{FullMethod: createMethod},
 			func(context.Context, any) (any, error) {
 				t.Fatal("handler should not run")
@@ -177,7 +184,7 @@ func TestAuthenticationUnaryInterceptor(t *testing.T) {
 	t.Run("invalid share token is denied", func(t *testing.T) {
 		store := &testShareStore{sessionShareErr: database.ErrNotFound}
 		ctx := metadata.NewIncomingContext(t.Context(), metadata.Pairs("x-share-token", "missing"))
-		_, err := authenticationUnaryInterceptor(&testAuthenticator{session: session}, nil, store, policies)(
+		_, err := authenticationUnaryInterceptor(&testAuthenticator{session: session}, store, policies, nil, nil)(
 			ctx, nil, &grpc.UnaryServerInfo{FullMethod: readMethod},
 			func(context.Context, any) (any, error) { return nil, nil },
 		)
@@ -188,7 +195,7 @@ func TestAuthenticationUnaryInterceptor(t *testing.T) {
 }
 
 func TestA2AShareAuthorizationIsDelegatedToGateway(t *testing.T) {
-	session := &testSession{principal: pkgauth.Principal{User: pkgauth.User{ID: "visitor"}}}
+	session := &testSession{principal: pkgauth.Principal{ID: "visitor"}}
 	store := &testShareStore{
 		sessionShare: &apiv1.SessionShare{
 			SessionId: testSessionID.String(),
@@ -202,7 +209,7 @@ func TestA2AShareAuthorizationIsDelegatedToGateway(t *testing.T) {
 	} {
 		t.Run(method, func(t *testing.T) {
 			ctx := metadata.NewIncomingContext(t.Context(), metadata.Pairs("x-share-token", "share"))
-			ctx, err := authenticate(ctx, method, &testAuthenticator{session: session}, nil, store, DefaultMethodPolicies())
+			ctx, err := authenticate(ctx, method, &testAuthenticator{session: session}, store, DefaultMethodPolicies(), nil, nil)
 			if err != nil {
 				t.Fatalf("A2A authorization must reach the gateway: %v", err)
 			}
@@ -211,31 +218,60 @@ func TestA2AShareAuthorizationIsDelegatedToGateway(t *testing.T) {
 				t.Fatalf("validated share = %#v, want read-only authority for its owner and session", share)
 			}
 			gotSession, ok := pkgauth.AuthSessionFrom(ctx)
-			if !ok || gotSession.Principal().User.ID != "visitor" {
+			if !ok || gotSession.Principal().ID != "visitor" {
 				t.Fatalf("authenticated session = %#v, want the visitor's identity", gotSession)
 			}
 		})
 	}
 }
 
-func TestInsecureRuntimeIdentityDoesNotAuthorizePublicAPI(t *testing.T) {
-	const runtimeMethod = "/test.TaskStore/Get"
-	policies := MethodPolicies{runtimeMethod: pkgauth.AccessRuntime, readMethod: pkgauth.AccessRead}
-	ctx := metadata.NewIncomingContext(t.Context(), metadata.Pairs(apia2a.InsecureRuntimeIdentityHeader, "team-a/session-"+uuid.NewString()+"/actor-uid"))
-	public := &testAuthenticator{err: errors.New("public credentials required")}
-	for _, method := range []string{runtimeMethod, readMethod} {
-		_, err := authenticate(ctx, method, public, nil, nil, policies)
-		if status.Code(err) != codes.Unauthenticated {
-			t.Fatalf("default %s: %v", method, err)
-		}
+func TestCallerWithoutRuntimeBindingCannotAccessRuntimeStorage(t *testing.T) {
+	provider := &testAuthenticator{session: &testSession{principal: pkgauth.Principal{ID: "user"}}}
+	_, err := authenticate(t.Context(), runtimev1.TaskStoreService_GetTask_FullMethodName, provider, nil, DefaultMethodPolicies(), nil, nil)
+	if status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("caller without runtime binding authorized runtime storage: %v", err)
 	}
-	_, err := authenticate(ctx, readMethod, public, &taskstore.Authenticator{}, nil, policies)
-	if status.Code(err) != codes.Unauthenticated {
-		t.Fatalf("runtime test mode authorized public API: %v", err)
+}
+
+func TestRuntimeAuthenticationReportsDatabaseConnectFailure(t *testing.T) {
+	ctx, logs := contextWithCapturedLogs(t)
+	provider := &testAuthenticator{err: fmt.Errorf("resolve actor session: %w", dbtest.LoginError(t, t.Context(), dbtest.RefuseConnections(t)))}
+
+	_, err := authenticate(ctx, runtimev1.TaskStoreService_GetTask_FullMethodName, provider, nil, DefaultMethodPolicies(), nil, nil)
+
+	if got := status.Code(err); got != codes.Unavailable {
+		t.Fatalf("code = %v, want Unavailable: %v", got, err)
 	}
-	_, err = authenticate(ctx, runtimeMethod, public, &taskstore.Authenticator{}, nil, policies)
-	if err != nil {
-		t.Fatalf("explicit runtime test mode rejected identity: %v", err)
+	if got := status.Convert(err).Message(); got != "database unavailable" {
+		t.Fatalf("message = %q", got)
+	}
+	if !strings.Contains(logs.String(), "connection refused") {
+		t.Fatalf("cause missing from logs: %s", logs.String())
+	}
+}
+
+func TestRuntimeAuthenticationReportsRejectedDatabaseLogin(t *testing.T) {
+	ctx, logs := contextWithCapturedLogs(t)
+	rejected := dbtest.LoginError(t, t.Context(), dbtest.RejectLogins(t, "28P01"))
+	provider := &testAuthenticator{err: fmt.Errorf("resolve actor session: %w", rejected)}
+
+	_, err := authenticate(ctx, runtimev1.TaskStoreService_GetTask_FullMethodName, provider, nil, DefaultMethodPolicies(), nil, nil)
+
+	if got := status.Code(err); got != codes.Internal {
+		t.Fatalf("code = %v, want Internal: %v", got, err)
+	}
+	if !strings.Contains(logs.String(), "SQLSTATE 28P01") {
+		t.Fatalf("cause missing from logs: %s", logs.String())
+	}
+}
+
+func TestRuntimeAuthenticationRejectsInvalidCredentials(t *testing.T) {
+	provider := &testAuthenticator{err: errors.New("token signature is invalid")}
+
+	_, err := authenticate(t.Context(), runtimev1.TaskStoreService_GetTask_FullMethodName, provider, nil, DefaultMethodPolicies(), nil, nil)
+
+	if got := status.Code(err); got != codes.Unauthenticated {
+		t.Fatalf("code = %v, want Unauthenticated: %v", got, err)
 	}
 }
 
@@ -286,4 +322,129 @@ func TestRecoverUnaryInterceptor(t *testing.T) {
 	if got := status.Convert(err).Message(); got != "internal server error" {
 		t.Fatalf("message = %q", got)
 	}
+}
+
+func TestErrorMappingReportsDatabaseConnectFailure(t *testing.T) {
+	refused := dbtest.LoginError(t, t.Context(), dbtest.RefuseConnections(t))
+	timedOut := connectErrorFromUnansweredLogin(t)
+	scenarios := []struct {
+		name string
+		err  error
+	}{
+		{"Given PostgreSQL refuses connections, when a handler returns the connect error, assert that the RPC is Unavailable and the cause is logged", refused},
+		{"Given PostgreSQL refuses connections, when a service wraps the connect error as internal, assert that the RPC is Unavailable and the cause is logged", serviceerrors.NewInternal("Failed to reserve Session", refused)},
+		{"Given PostgreSQL never answers the login, when the connect deadline expires, assert that the RPC is Unavailable and the cause is logged", timedOut},
+	}
+	for _, scenario := range scenarios {
+		t.Run(scenario.name, func(t *testing.T) {
+			ctx, logs := contextWithCapturedLogs(t)
+
+			_, err := errorMappingUnaryInterceptor(ctx, nil, &grpc.UnaryServerInfo{FullMethod: createMethod}, func(context.Context, any) (any, error) {
+				return nil, scenario.err
+			})
+
+			if got := status.Code(err); got != codes.Unavailable {
+				t.Fatalf("code = %v, want Unavailable", got)
+			}
+			if got := status.Convert(err).Message(); got != "database unavailable" {
+				t.Fatalf("message = %q", got)
+			}
+			if !strings.Contains(logs.String(), refusedOrTimedOutCause(scenario.err)) {
+				t.Fatalf("cause missing from logs: %s", logs.String())
+			}
+		})
+	}
+
+	t.Run("Given a non-database failure, when a handler returns it, assert that the RPC is Internal with a generic message and the cause is logged", func(t *testing.T) {
+		ctx, logs := contextWithCapturedLogs(t)
+
+		_, err := errorMappingUnaryInterceptor(ctx, nil, &grpc.UnaryServerInfo{FullMethod: createMethod}, func(context.Context, any) (any, error) {
+			return nil, serviceerrors.NewInternal("Failed to reserve Session", errors.New("row decode failed"))
+		})
+
+		if got := status.Code(err); got != codes.Internal {
+			t.Fatalf("code = %v, want Internal", got)
+		}
+		if got := status.Convert(err).Message(); got != "internal server error" {
+			t.Fatalf("message = %q", got)
+		}
+		if !strings.Contains(logs.String(), "row decode failed") {
+			t.Fatalf("cause missing from logs: %s", logs.String())
+		}
+	})
+
+	t.Run("Given PostgreSQL rejects the login password, when a handler returns the connect error, assert that the RPC is Internal and the cause is logged", func(t *testing.T) {
+		ctx, logs := contextWithCapturedLogs(t)
+		rejected := dbtest.LoginError(t, t.Context(), dbtest.RejectLogins(t, "28P01"))
+
+		_, err := errorMappingUnaryInterceptor(ctx, nil, &grpc.UnaryServerInfo{FullMethod: createMethod}, func(context.Context, any) (any, error) {
+			return nil, serviceerrors.NewInternal("Failed to reserve Session", rejected)
+		})
+
+		if got := status.Code(err); got != codes.Internal {
+			t.Fatalf("code = %v, want Internal", got)
+		}
+		if got := status.Convert(err).Message(); got != "internal server error" {
+			t.Fatalf("message = %q", got)
+		}
+		if !strings.Contains(logs.String(), "SQLSTATE 28P01") {
+			t.Fatalf("cause missing from logs: %s", logs.String())
+		}
+	})
+
+	t.Run("Given a client error, when a handler returns it, assert that nothing is logged", func(t *testing.T) {
+		ctx, logs := contextWithCapturedLogs(t)
+
+		_, err := errorMappingUnaryInterceptor(ctx, nil, &grpc.UnaryServerInfo{FullMethod: createMethod}, func(context.Context, any) (any, error) {
+			return nil, serviceerrors.NewNotFound("missing", nil)
+		})
+
+		if got := status.Code(err); got != codes.NotFound {
+			t.Fatalf("code = %v, want NotFound", got)
+		}
+		if logs.Len() != 0 {
+			t.Fatalf("unexpected log: %s", logs.String())
+		}
+	})
+}
+
+func contextWithCapturedLogs(t *testing.T) (context.Context, *bytes.Buffer) {
+	t.Helper()
+	var logs bytes.Buffer
+	return logging.IntoContext(t.Context(), slog.New(slog.NewTextHandler(&logs, nil))), &logs
+}
+
+func refusedOrTimedOutCause(err error) string {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "context deadline exceeded"
+	}
+	return "connection refused"
+}
+
+func connectErrorFromUnansweredLogin(t *testing.T) error {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	t.Cleanup(func() {
+		close(done)
+		_ = listener.Close()
+	})
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		<-done
+		_ = conn.Close()
+	}()
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+	err = dbtest.LoginError(t, ctx, listener.Addr().String())
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("connect error does not wrap DeadlineExceeded: %v", err)
+	}
+	return err
 }

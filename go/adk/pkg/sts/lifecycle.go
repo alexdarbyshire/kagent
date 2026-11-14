@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/kagent-dev/kagent/go/adk/pkg/mcp"
 	"github.com/kagent-dev/kagent/go/adk/pkg/models"
 )
 
@@ -20,15 +19,13 @@ type lifecycleAuthority struct {
 	custodyID uint64
 }
 
-var _ mcp.LifecycleAuthority = (*lifecycleAuthority)(nil)
-
 // LifecycleAuthority references authority already held by this provider. It
 // performs no exchange and does not renew cache eviction or credential expiry.
-func (p *TokenPropagationPlugin) LifecycleAuthority(ctx context.Context) mcp.LifecycleAuthority {
+func (p *TokenPropagationPlugin) LifecycleAuthority(ctx context.Context) *lifecycleAuthority {
 	if ctx == nil {
 		return nil
 	}
-	key := cacheKey{sessionID: sessionIDFromContext(ctx), subject: subjectKey(models.BearerTokenFromContext(ctx))}
+	key := cacheKey{sessionID: models.SessionIDFromContext(ctx), subject: subjectKey(models.BearerTokenFromContext(ctx))}
 	if key.sessionID == "" || key.subject == "" {
 		return nil
 	}

@@ -14,10 +14,12 @@ import { SnapshotDetailsModal } from "@/components/chat/SnapshotDetailsModal";
 import { SnapshotRenameDialog } from "@/components/chat/SnapshotRenameDialog";
 import { ChatTranscript } from "@/components/chat/ChatTranscript";
 import { TaskPushNotificationsModal } from "@/components/chat/TaskPushNotificationsModal";
-import { isLifecycleBusy } from "@/components/chat/lifecycleReading";
+import { isLifecycleBusy, isRuntimeLost } from "@/components/chat/lifecycleReading";
 import { paths } from "@/router/routes";
 import {
+  ApiError,
   apiClient,
+  canForkFrom,
   useAgentInstance,
   useAgentInstances,
   useAgentTakesFiles,
@@ -27,7 +29,7 @@ import { autoTitleFrom } from "@/components/agent-instances/instanceLabels";
 import { useLiveTranscript } from "@/api/hooks/useLiveTranscript";
 import { useInvalidateConversations } from "@/api/hooks/useInvalidateConversations";
 import { useCheckpoints } from "@/api/hooks/useCheckpoints";
-import type { Checkpoint } from "@/api";
+import type { AgentInstance, Checkpoint } from "@/api";
 import { useCollapsedBelow } from "@/components/chat/useNarrowViewport";
 import { checkpointsByMessage } from "@/components/chat/messageCheckpoints";
 import { messageSummary } from "@/components/chat/messageText";
@@ -35,6 +37,42 @@ import { handOffFirstMessage, takeFirstMessage, type FirstMessage } from "@/api/
 import { useExtensionAgentLinks } from "@/appExtensions/hooks";
 import { agentUrl } from "@/components/agent/agentUrl";
 import { isMockMode } from "@/api/config";
+
+/**
+ * What the not-ready alert says about a conversation that cannot take a message.
+ *
+ * Read from the stored Session alone. A pending crash recovery and a runtime that is
+ * gone are both FAILED, and only the operation and failure reason tell them apart.
+ */
+function notReadyCopy(
+  instance: AgentInstance,
+  canFork: boolean,
+): { title: string; description: string } {
+  if (isRuntimeLost(instance)) {
+    return {
+      title: "This conversation's runtime cannot be recovered",
+      description: [
+        instance.failure?.message,
+        canFork
+          ? "Start another conversation, or fork a saved snapshot from the transcript. This one can still be read."
+          : "Start another conversation. This one can still be read.",
+      ].filter(Boolean).join(" "),
+    };
+  }
+  if (instance.operation === "revert") {
+    return {
+      title: "Recovering this conversation after a crash",
+      description:
+        "The agent's runtime crashed and is being restored from its last snapshot. The agent accepts messages again once that finishes, and does not remember messages sent after that snapshot. If recovery does not finish, select Recover to try again.",
+    };
+  }
+  return {
+    title: `This conversation is ${instance.state}, so the agent cannot answer`,
+    description:
+      instance.failure?.message ||
+      "The agent accepts messages once this conversation is ready. You can also start another conversation.",
+  };
+}
 
 /**
  * How often the instance is re-read while it is doing something.
@@ -111,28 +149,7 @@ export function AgentChatPage() {
     () => (id && agent ? { id, agent, contextId } : undefined),
     [id, agent, contextId],
   );
-  /**
-   * Resume a suspended conversation before any turn begins.
-   *
-   * Handed to `useChat` rather than wrapped around `send`, because a turn begins two
-   * ways: the composer, and Retry. Retry starts one from inside the hook and never
-   * sees a wrapper out here — and with conversations giving their workers back after
-   * every turn, suspended is exactly the state a failed turn leaves behind, so Retry
-   * is the likeliest button to be pressed against one.
-   *
-   * The state is read when the turn starts rather than closed over, and the resume is
-   * awaited rather than fired alongside the send: sending into an instance that has
-   * not finished resuming is the refusal this exists to avoid.
-   */
-
-  const resumeFirst = useCallback(async () => {
-    if (instance.data?.state !== "suspended" || !id) return;
-    await apiClient.agentInstances.resume(id);
-    await instance.refresh();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [instance.data?.state, id]);
-
-  const chat = useChat(conversation, resumeFirst);
+  const chat = useChat(conversation);
   const [pushTask, setPushTask] = useState<{ conversationId: string; taskId: string }>();
 
   // Keep up with messages sent from other tabs or clients.
@@ -324,30 +341,9 @@ export function AgentChatPage() {
    * is disabled until then rather than creating something from a half-read record.
    */
 
-  /*
-   * Whether this agent can be talked to at all.
-   *
-   * The gateway refuses any call for an instance that is not `READY` — it answers
-   * `UnsupportedOperation` naming the state — so a composer offered over a suspended
-   * or failed agent is a box that swallows what the reader types. The state is said
-   * instead.
-   */
+  // Automatic runtime quiescence leaves the conversation ready for its next turn.
   const state = instance.data?.state;
-  const isReady = state === "ready";
-  /*
-   * Suspended is not "cannot answer" — it is "not resumed yet".
-   *
-   * The gateway does refuse a message for a suspended instance, but the reader's
-   * intention is unambiguous: they typed something and pressed send. Making them find
-   * a Resume control first, having just been told the agent gave its worker back at
-   * the end of the last turn, is a step the page can take for them — and with
-   * that would be a detour on the way to every message.
-   *
-   * Only suspended. Creating, failed and deleting are states a message cannot be
-   * carried through by resuming, so those still say so and disable the box.
-   */
-  const isSuspended = state === "suspended";
-  const canSend = isReady || isSuspended;
+  const canSend = state === "ready";
 
   /*
    * Watching the instance while it is doing something.
@@ -409,7 +405,7 @@ export function AgentChatPage() {
    * happen at all, so this waits for the state that enables it.
    *
    * Once per conversation, tracked rather than left to fire whenever `canSend` is
-   * true. A conversation that comes back from suspended flips it mid-visit, and the
+   * true. A conversation that finishes preparing flips it mid-visit, and the
    * caret is by then wherever the reader put it — quite possibly in the field
    * answering a question, which is the one place taking it from would cost them
    * typing.
@@ -487,31 +483,43 @@ export function AgentChatPage() {
    * next ordinary read, which costs nothing a reader can see.
    */
 
-  /*
-   * The page no longer suspends a conversation when its turn ends.
-   *
-   * It used to, and had to: nothing on the server gave a worker back, so a conversation
-   * held one from creation until somebody suspended or deleted it, and a cluster with
-   * more conversations than workers could not start another. The page made the
-   * `SuspendAgentInstance` call nobody else was making.
-   *
-   * The server does it now — a completed A2A turn quiesces its own runtime and records
-   * the snapshot boundary it stopped at. That is strictly better than what this did: it
-   * happens whether or not a tab is open, which was this version's stated limitation and
-   * the reason the pool could still fill up.
-   *
-   * Doing both would be worse than doing neither. The server's quiesce releases the
-   * worker and deliberately leaves the instance logically `ready`; this suspended it
-   * logically as well, so every conversation read as suspended and every message paid
-   * for a resume first — a round trip added to each turn for something already done.
-   */
-
   // Held in a ref so the interval is not torn down and rebuilt every time SWR
   // hands back a new function identity — which would reset the clock on each read.
   const refreshInstance = useRef(instance.refresh);
   useEffect(() => {
     refreshInstance.current = instance.refresh;
   });
+
+  /*
+   * Reverts the runtime on the reader's request.
+   *
+   * Offered while a recovery is pending, since a failed one stays FAILED/REVERT until
+   * something retries it, and when sends keep being refused, since a crashed runtime
+   * looks READY until something observes it. Either way it is explicit, so it works
+   * whether or not the controller recovers on send. A healthy runtime is returned
+   * unchanged, and one that cannot be recovered is recorded as lost.
+   */
+  const [isRecovering, setRecovering] = useState(false);
+  const recover = useCallback(async () => {
+    if (!id) return;
+    setRecovering(true);
+    try {
+      const recovered = await apiClient.agentInstances.revert(id);
+      toast.success(recovered.state === "ready"
+        ? "The runtime is ready. Retry your message."
+        : "Recovery finished.");
+    } catch (cause: unknown) {
+      console.error("Could not recover the conversation:", cause);
+      toast.error(cause instanceof ApiError && cause.code === "Aborted"
+        ? "The runtime is busy with another operation. Try again shortly."
+        : `Could not recover: ${cause instanceof Error ? cause.message : String(cause)}`);
+    } finally {
+      setRecovering(false);
+      await refreshInstance.current().catch((cause: unknown) => {
+        console.error("Could not re-read the conversation:", cause);
+      });
+    }
+  }, [id]);
 
   useEffect(() => {
     if (!isBusy) return;
@@ -681,19 +689,17 @@ export function AgentChatPage() {
             />
           ) : null}
 
-          {/* The controller's own precondition, said rather than discovered. A
-              suspended agent is resumable from the agents list, which is why the
-              state is named rather than the page simply refusing. */}
           {instance.data && !canSend ? (
             <Alert
               type="warning"
               showIcon
               data-testid="chat-not-ready"
-              title={`This conversation is ${state}, so the agent cannot answer`}
-              description={
-                instance.data.failure?.message ||
-                "The A2A gateway accepts messages only for a ready conversation. Resume it from the agent's page, or start another conversation."
-              }
+              {...notReadyCopy(instance.data, (checkpoints.data ?? []).some(canForkFrom))}
+              action={instance.data.operation === "revert" ? (
+                <Button size="small" loading={isRecovering} onClick={() => void recover()}>
+                  Recover
+                </Button>
+              ) : undefined}
             />
           ) : null}
 
@@ -707,6 +713,9 @@ export function AgentChatPage() {
             onRenameCheckpoint={renameSnapshot}
             onFork={forkCheckpoint}
             onDeleteCheckpoint={deleteCheckpoint}
+            // A conversation that is not ready has its own alert with Recover.
+            onRecover={canSend ? () => void recover() : undefined}
+            isRecovering={isRecovering}
             // The mock chat client has no A2A push store; hide the control rather
             // than showing a backend error over an otherwise scripted transcript.
             onManageTaskPush={isMockMode ? undefined : (taskId) => {

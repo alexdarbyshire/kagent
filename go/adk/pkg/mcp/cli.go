@@ -200,7 +200,7 @@ func openCLISession(ctx context.Context, binding cliBinding, headers *cliCommand
 	}
 	lifecycle := &cliHTTPTransport{base: invocation, endpoint: endpoint, legacySSE: binding.SSE != nil}
 	httpClient.Transport = lifecycle
-	resolver := &headerRoundTripper{headers: params.Headers, allowedHeaders: params.AllowedHeaders}
+	resolver := &headerRoundTripper{headers: params.Headers, allowedHeaders: params.AllowedHeaders, tokenPassthrough: params.TokenPassthrough}
 	var provider LifecycleAuthorityProvider
 	if headers != nil {
 		resolver = headers.resolver
@@ -328,10 +328,10 @@ func cliTimeout(params mcpServerParams) (time.Duration, error) {
 func cliConnection(binding cliBinding) (mcpServerParams, []string, bool) {
 	if binding.SSE != nil {
 		p := binding.SSE.Params
-		return mcpServerParams{URL: p.Url, ServerType: "sse", Headers: p.Headers, Timeout: cliDuration(p.Timeout), SseReadTimeout: cliDuration(p.SseReadTimeout), TLSInsecureSkipVerify: p.TLSInsecureSkipVerify, TLSCACertPath: p.TLSCACertPath, TLSDisableSystemCAs: p.TLSDisableSystemCAs}, binding.SSE.Tools, binding.SSE.RequireApproval
+		return mcpServerParams{URL: p.Url, ServerType: "sse", TokenPassthrough: binding.SSE.TokenPassthrough, Headers: p.Headers, Timeout: cliDuration(p.Timeout), SseReadTimeout: cliDuration(p.SseReadTimeout), TLSInsecureSkipVerify: p.TLSInsecureSkipVerify, TLSCACertPath: p.TLSCACertPath, TLSDisableSystemCAs: p.TLSDisableSystemCAs}, binding.SSE.Tools, binding.SSE.RequireApproval
 	}
 	p := binding.HTTP.Params
-	return mcpServerParams{URL: p.Url, ServerType: "http", Headers: p.Headers, Timeout: cliDuration(p.Timeout), SseReadTimeout: cliDuration(p.SseReadTimeout), TLSInsecureSkipVerify: p.TLSInsecureSkipVerify, TLSCACertPath: p.TLSCACertPath, TLSDisableSystemCAs: p.TLSDisableSystemCAs}, binding.HTTP.Tools, binding.HTTP.RequireApproval
+	return mcpServerParams{URL: p.Url, ServerType: "http", TokenPassthrough: binding.HTTP.TokenPassthrough, Headers: p.Headers, Timeout: cliDuration(p.Timeout), SseReadTimeout: cliDuration(p.SseReadTimeout), TLSInsecureSkipVerify: p.TLSInsecureSkipVerify, TLSCACertPath: p.TLSCACertPath, TLSDisableSystemCAs: p.TLSDisableSystemCAs}, binding.HTTP.Tools, binding.HTTP.RequireApproval
 }
 
 // Token decoding rejects duplicate keys at every depth and retains JSON numbers.

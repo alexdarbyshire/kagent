@@ -3,6 +3,7 @@ package mcp
 import (
 	"errors"
 	"fmt"
+	"io"
 
 	adkagent "google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/tool"
@@ -12,14 +13,15 @@ import (
 // Google owns conversion and confirmation; the host selects its scoped client.
 type scopedNativeToolset struct {
 	params    mcpServerParams
-	predicate tool.Predicate
+	filter    map[string]bool
+	discovery *mcpAppDiscovery
 	binding   string
 }
 
 func (n *scopedNativeToolset) Name() string { return "mcp_tool_set" }
 
 func (n *scopedNativeToolset) selectRelationship(ctx adkagent.ReadonlyContext) (*clientRelationship, func(), error) {
-	resolver := &headerRoundTripper{headers: n.params.Headers, allowedHeaders: n.params.AllowedHeaders, propagateToken: n.params.PropagateToken, headerProvider: n.params.HeaderProvider}
+	resolver := &headerRoundTripper{headers: n.params.Headers, allowedHeaders: n.params.AllowedHeaders, propagateToken: n.params.PropagateToken, headerProvider: n.params.HeaderProvider, tokenPassthrough: n.params.TokenPassthrough}
 	key, err := n.params.Lifecycle.scopeKey(ctx, n.binding, "native", resolver)
 	if err != nil {
 		return nil, nil, err
@@ -37,14 +39,23 @@ func (n *scopedNativeToolset) selectRelationship(ctx adkagent.ReadonlyContext) (
 		params.relationship = owned
 		transport, err := createManagedTransport(ctx, params)
 		if err == nil {
-			owned.native, err = mcptoolset.New(mcptoolset.Config{Transport: transport, Client: nativeResultClient(n.params.Lifecycle.running)})
+			client := newMCPAppClient(n.filter, n.discovery)
+			addNativeResultTransformer(client, n.params.Lifecycle.running)
+			native, createErr := mcptoolset.New(mcptoolset.Config{Transport: transport, Client: client})
+			err = createErr
+			if err == nil {
+				closer, closable := native.(io.Closer)
+				if closable && !n.params.Lifecycle.registerNative(closer) {
+					_ = closer.Close()
+					err = errors.New("MCP client lifecycle stopped")
+				} else {
+					owned.native = native
+				}
+			}
 		}
 		if err != nil {
 			release()
 			return nil, nil, err
-		}
-		if n.predicate != nil {
-			owned.native = tool.FilterToolset(owned.native, n.predicate)
 		}
 	}
 	return owned, release, nil

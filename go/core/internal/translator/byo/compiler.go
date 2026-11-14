@@ -33,7 +33,7 @@ func NewCompiler(ctx krt.HandlerContext, collections translator.Collections, set
 }
 
 func (c *Compiler) Compile(ctx context.Context, input *translator.HarnessInput) (*translator.CompileResult, error) {
-	if err := translator.ValidateCLIExposure(input, c.settings.GetSkillTools().GetDisableBash()); err != nil {
+	if err := translator.ValidateCLIExposure(input, c.settings.GetBuiltinTools().GetDisableBash()); err != nil {
 		return nil, err
 	}
 	compiled, err := c.config.Build(ctx, input)
@@ -69,11 +69,11 @@ func (c *Compiler) Compile(ctx context.Context, input *translator.HarnessInput) 
 			AgentName: input.AgentName, AgentNamespace: template.Namespace,
 		}, environment)
 	}
-	provenance, err := c.config.BuildProvenance(ctx, harness, compiled.Templates, compiled.Models, environment)
+	provenance, err := c.config.BuildProvenance(ctx, harness, compiled)
 	if err != nil {
 		return nil, fmt.Errorf("build revision provenance: %w", err)
 	}
-	environment, credentials, err := translator.CompileCredentials(input, compiled.Models, environment)
+	environment, credentials, tokenPassthroughTargets, err := translator.CompileCredentials(input, compiled.Models, environment)
 	if err != nil {
 		return nil, err
 	}
@@ -82,13 +82,13 @@ func (c *Compiler) Compile(ctx context.Context, input *translator.HarnessInput) 
 	slices.Sort(compiled.Egress)
 
 	return &translator.CompileResult{Revision: translator.Revision{
-		Capabilities: harness.Spec.Workload.Capabilities.DeepCopy(),
-		Namespace:    template.Namespace,
-		Command:      harness.Spec.Workload.Command, Args: harness.Spec.Workload.Args,
+		ControlPlaneURL: c.settings.GetControlPlaneUrl(),
+		Namespace:       template.Namespace,
+		Command:         harness.Spec.Workload.Command, Args: harness.Spec.Workload.Args,
 		Environment: environment, ConfigJSON: configJSON, AgentCard: card,
 		SkillImages:    compiled.SkillImages,
 		WorkerPoolName: harness.Spec.Substrate.WorkerPoolRef.Name, SnapshotLocation: harness.Spec.Substrate.SnapshotPolicy.Location,
-		Credentials: credentials, Provenance: provenance, EgressDestinations: slices.Compact(compiled.Egress),
+		TokenPassthroughTargets: tokenPassthroughTargets, Credentials: credentials, Provenance: provenance, EgressDestinations: slices.Compact(compiled.Egress),
 	}}, nil
 }
 

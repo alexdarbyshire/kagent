@@ -75,13 +75,17 @@ func (c *ClientLifecycle) scopeKey(ctx context.Context, binding, presentation st
 		return key, errors.New("MCP command requires the original scoped agent context")
 	}
 	// Static binding authority wins over a provider, matching header precedence.
-	if c.provider != nil && resolver.resolveStaticAuthorization() == "" {
+	if c.provider != nil && !resolver.tokenPassthrough && resolver.resolveStaticAuthorization() == "" {
 		if identity, ok := c.provider(ctx).(AuthorityIdentity); ok {
 			key.authority = identity.Identity()
 		}
 	}
 	if key.authority == "" {
-		key.authority = bindingIdentity(resolver.resolveHeaders(ctx))
+		headers, err := resolver.resolveHeaders(ctx)
+		if err != nil {
+			return key, err
+		}
+		key.authority = bindingIdentity(headers)
 	}
 	return key, nil
 }

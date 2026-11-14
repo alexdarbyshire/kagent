@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"io"
 
 	adkagent "google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/model"
@@ -54,6 +55,13 @@ type nativeInvocationToolset struct{ inner tool.Toolset }
 var _ tool.Toolset = (*nativeInvocationToolset)(nil)
 
 func (n *nativeInvocationToolset) Name() string { return n.inner.Name() }
+
+func (n *nativeInvocationToolset) Close() error {
+	if closer, ok := n.inner.(io.Closer); ok {
+		return closer.Close()
+	}
+	return nil
+}
 
 func (n *nativeInvocationToolset) Tools(ctx adkagent.ReadonlyContext) ([]tool.Tool, error) {
 	tools, err := n.inner.Tools(nativeReadonlyContext{ReadonlyContext: ctx})

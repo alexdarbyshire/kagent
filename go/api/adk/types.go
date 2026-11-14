@@ -13,10 +13,11 @@ type StreamableHTTPConnectionParams struct {
 }
 
 type HttpMcpServerConfig struct {
-	Params          StreamableHTTPConnectionParams `json:"params"`
-	Tools           []string                       `json:"tools,omitempty"`
-	AllowedHeaders  []string                       `json:"allowed_headers,omitempty"`
-	RequireApproval bool                           `json:"require_approval,omitempty"`
+	Params           StreamableHTTPConnectionParams `json:"params"`
+	Tools            []string                       `json:"tools,omitempty"`
+	AllowedHeaders   []string                       `json:"allowed_headers,omitempty"`
+	TokenPassthrough bool                           `json:"token_passthrough,omitempty"`
+	RequireApproval  bool                           `json:"require_approval,omitempty"`
 }
 
 // MCPCLIConfig is a private, named command binding consumed by the Go runtime
@@ -43,8 +44,9 @@ type SseConnectionParams struct {
 }
 
 type SseMcpServerConfig struct {
-	Params          SseConnectionParams `json:"params"`
-	Tools           []string            `json:"tools,omitempty"`
-	AllowedHeaders  []string            `json:"allowed_headers,omitempty"`
-	RequireApproval bool                `json:"require_approval,omitempty"`
+	Params           SseConnectionParams `json:"params"`
+	Tools            []string            `json:"tools,omitempty"`
+	AllowedHeaders   []string            `json:"allowed_headers,omitempty"`
+	TokenPassthrough bool                `json:"token_passthrough,omitempty"`
+	RequireApproval  bool                `json:"require_approval,omitempty"`
 }

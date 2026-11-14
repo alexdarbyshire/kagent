@@ -7,10 +7,11 @@ import (
 	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
-	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
+	ateapipb "go.ate.dev/substrate/api/ateapi/v1"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/metric/noop"
 	"go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"google.golang.org/grpc/codes"
@@ -25,7 +26,7 @@ func TestSessionExpirationRetriesDeletion(t *testing.T) {
 		t.Run(failure, func(t *testing.T) {
 			store, session := lifecycleFixture(t)
 			base := &lifecycleTestActors{actors: map[string]*ateapipb.Actor{}}
-			session, err := NewActorWorkflow(store, base, make(chan struct{}, 1), time.Second).Create(t.Context(), session)
+			session, err := NewActorWorkflow(store, base, make(chan struct{}, 1), time.Second, noop.NewMeterProvider()).Create(t.Context(), session)
 			require.NoError(t, err)
 			actors := &expirationActors{retryTestActors: &retryTestActors{lifecycleTestActors: base}}
 			writes := &completionTestStore{lifecycleTestStore: store}
@@ -37,7 +38,7 @@ func TestSessionExpirationRetriesDeletion(t *testing.T) {
 			case "persistence":
 				writes.finishErr = errors.New("database unavailable")
 			}
-			worker, err := NewExpirationWorker(store, NewActorWorkflow(writes, actors, make(chan struct{}, 1), time.Second), 7*24*time.Hour, time.Minute)
+			worker, err := NewExpirationWorker(store, NewActorWorkflow(writes, actors, make(chan struct{}, 1), time.Second, noop.NewMeterProvider()), 7*24*time.Hour, time.Minute)
 			require.NoError(t, err)
 			require.Error(t, worker.expire(t.Context(), session.Id, time.Now()))
 			require.ErrorIs(t, store.ReserveSessionDispatch(t.Context(), session.Id, uuid.New(), "next turn"), database.ErrConflict)
@@ -45,7 +46,7 @@ func TestSessionExpirationRetriesDeletion(t *testing.T) {
 			actors.readErr, writes.finishErr = nil, nil
 			// A replacement worker discovers the durable expiration even with
 			// a longer TTL, without a client retry or an in-memory work queue.
-			worker, err = NewExpirationWorker(store, NewActorWorkflow(writes, actors, make(chan struct{}, 1), time.Second), 30*24*time.Hour, time.Minute)
+			worker, err = NewExpirationWorker(store, NewActorWorkflow(writes, actors, make(chan struct{}, 1), time.Second, noop.NewMeterProvider()), 30*24*time.Hour, time.Minute)
 			require.NoError(t, err)
 			ids, err := store.ListIdleSessions(t.Context(), time.Time{}, "", 100)
 			require.NoError(t, err)
@@ -65,9 +66,9 @@ type expirationActors struct {
 	deletions          int
 }
 
-func (e *expirationActors) DeleteActor(ctx context.Context, space, name string) error {
+func (e *expirationActors) DeleteActor(ctx context.Context, space, name, uid string) error {
 	e.deletions++
-	if err := e.retryTestActors.DeleteActor(ctx, space, name); err != nil {
+	if err := e.retryTestActors.DeleteActor(ctx, space, name, uid); err != nil {
 		return err
 	}
 	if e.loseDeleteResponse {
@@ -77,12 +78,38 @@ func (e *expirationActors) DeleteActor(ctx context.Context, space, name string) 
 	return nil
 }
 
+func TestWaitingSessionExpirationDeletesRuntime(t *testing.T) {
+	for _, state := range []a2a.TaskState{a2a.TaskStateInputRequired, a2a.TaskStateAuthRequired} {
+		t.Run(string(state), func(t *testing.T) {
+			store, session := lifecycleFixture(t)
+			actors := &lifecycleTestActors{actors: map[string]*ateapipb.Actor{}}
+			workflow := NewActorWorkflow(store, actors, make(chan struct{}, 1), time.Second, noop.NewMeterProvider())
+			session, err := workflow.Create(t.Context(), session)
+			require.NoError(t, err)
+			request := stageQuiescenceTask(t, store.Client, session, state)
+			require.NoError(t, store.SettleSessionTask(t.Context(), session.Id, request.TaskId, request.Version))
+			work, err := store.ClaimSessionQuiescence(t.Context())
+			require.NoError(t, err)
+			snapshot, err := workflow.Quiesce(t.Context(), session)
+			require.NoError(t, err)
+			require.NoError(t, store.FinishSessionQuiescence(t.Context(), work, snapshot))
+
+			worker, err := NewExpirationWorker(store, workflow, time.Hour, time.Minute)
+			require.NoError(t, err)
+			require.NoError(t, worker.expire(t.Context(), session.Id, time.Now()))
+			_, err = store.GetSessionByID(t.Context(), session.Id)
+			require.ErrorIs(t, err, database.ErrNotFound)
+			require.Empty(t, actors.actors, "expiration removes the suspended runtime without another interaction")
+		})
+	}
+}
+
 func TestSessionExpirationRetainsCheckpointHistory(t *testing.T) {
 	store, source := lifecycleFixture(t)
 	actors := &lifecycleTestActors{actors: map[string]*ateapipb.Actor{}}
 	_, checkpointID := lifecycleForkFixture(t, store, actors, source)
-	interactions := NewInteractionService(store, nil, NewService(store, serviceTestAuthorizer{}, nil), false)
-	agent := types.NamespacedName{Namespace: source.Agent.Namespace, Name: source.Agent.Name}
+	interactions := NewInteractionService(store, nil, NewService(store, serviceTestAuthorizer{}, nil), false, false)
+	agent := types.NamespacedName{Namespace: source.GetAgent().Ref.Namespace, Name: source.GetAgent().Ref.Name}
 	// Real ownership filtering must hide an existing conversation in exactly
 	// the same way as a missing or expired conversation, without reading history.
 	_, err := interactions.ListTasks(serviceTestContext("visitor"), agent, &a2a.ListTasksRequest{ContextID: source.ContextId})
@@ -94,7 +121,7 @@ func TestSessionExpirationRetainsCheckpointHistory(t *testing.T) {
 	require.Len(t, live.Tasks, 1)
 	_, err = interactions.GetTask(serviceTestContext("visitor"), agent, &a2a.GetTaskRequest{ID: live.Tasks[0].ID})
 	require.ErrorIs(t, err, a2a.ErrTaskNotFound)
-	worker, err := NewExpirationWorker(store, NewActorWorkflow(store, actors, make(chan struct{}, 1), time.Second), time.Hour, time.Minute)
+	worker, err := NewExpirationWorker(store, NewActorWorkflow(store, actors, make(chan struct{}, 1), time.Second, noop.NewMeterProvider()), time.Hour, time.Minute)
 	require.NoError(t, err)
 	require.NoError(t, worker.expire(t.Context(), source.Id, time.Now()))
 	_, err = interactions.ListTasks(serviceTestContext(source.Creator), agent, &a2a.ListTasksRequest{ContextID: source.ContextId})
@@ -120,7 +147,7 @@ func TestSessionExpirationRetainsCheckpointHistory(t *testing.T) {
 func TestSessionDeleteCompletesIdleDeletion(t *testing.T) {
 	store, session := lifecycleFixture(t)
 	actors := &lifecycleTestActors{actors: map[string]*ateapipb.Actor{}}
-	workflow := NewActorWorkflow(store, actors, make(chan struct{}, 1), time.Second)
+	workflow := NewActorWorkflow(store, actors, make(chan struct{}, 1), time.Second, noop.NewMeterProvider())
 	session, err := workflow.Create(t.Context(), session)
 	require.NoError(t, err)
 	_, err = store.BeginIdleSessionDeletion(t.Context(), session.Id, time.Now())
@@ -128,7 +155,7 @@ func TestSessionDeleteCompletesIdleDeletion(t *testing.T) {
 
 	// An explicit Delete joins the idle deletion and removes its receipt in
 	// the ordinary completion transaction; no separate expiration finish runs.
-	_, err = workflow.Delete(t.Context(), session)
+	_, err = workflow.Delete(t.Context(), session, false)
 	require.NoError(t, err)
 	_, err = store.GetSessionByID(t.Context(), session.Id)
 	require.ErrorIs(t, err, database.ErrNotFound)
@@ -148,10 +175,10 @@ func TestSessionExpirationCountsCompletedSweepDeletionOnce(t *testing.T) {
 	})
 	store, session := lifecycleFixture(t)
 	actors := &lifecycleTestActors{actors: map[string]*ateapipb.Actor{}}
-	session, err := NewActorWorkflow(store, actors, make(chan struct{}, 1), time.Second).Create(t.Context(), session)
+	session, err := NewActorWorkflow(store, actors, make(chan struct{}, 1), time.Second, noop.NewMeterProvider()).Create(t.Context(), session)
 	require.NoError(t, err)
 	writes := &completionTestStore{lifecycleTestStore: store, finishErr: errors.New("database unavailable")}
-	worker, err := NewExpirationWorker(store, NewActorWorkflow(writes, actors, make(chan struct{}, 1), time.Second), time.Hour, time.Minute)
+	worker, err := NewExpirationWorker(store, NewActorWorkflow(writes, actors, make(chan struct{}, 1), time.Second, noop.NewMeterProvider()), time.Hour, time.Minute)
 	require.NoError(t, err)
 	require.Error(t, worker.expire(t.Context(), session.Id, time.Now()))
 	writes.finishErr = nil
@@ -198,7 +225,7 @@ func TestSessionExpirationConfiguration(t *testing.T) {
 func TestSessionExpirationWorkerDiscoversIdleSessions(t *testing.T) {
 	store, session := lifecycleFixture(t)
 	actors := &lifecycleTestActors{actors: map[string]*ateapipb.Actor{}}
-	workflow := NewActorWorkflow(store, actors, make(chan struct{}, 1), time.Second)
+	workflow := NewActorWorkflow(store, actors, make(chan struct{}, 1), time.Second, noop.NewMeterProvider())
 	session, err := workflow.Create(t.Context(), session)
 	require.NoError(t, err)
 	worker, err := NewExpirationWorker(store, workflow, time.Nanosecond, time.Minute)
@@ -216,7 +243,7 @@ func TestSessionExpirationWorkerDiscoversIdleSessions(t *testing.T) {
 func TestSessionExpirationSerializesRuntimeAttempts(t *testing.T) {
 	store, session := lifecycleFixture(t)
 	actors := &lifecycleTestActors{actors: map[string]*ateapipb.Actor{}}
-	session, err := NewActorWorkflow(store, actors, make(chan struct{}, 1), time.Second).Create(t.Context(), session)
+	session, err := NewActorWorkflow(store, actors, make(chan struct{}, 1), time.Second, noop.NewMeterProvider()).Create(t.Context(), session)
 	require.NoError(t, err)
 	entered, release := make(chan struct{}), make(chan struct{})
 	writes := &completionTestStore{lifecycleTestStore: store, afterClaim: func(ctx context.Context) {
@@ -226,9 +253,9 @@ func TestSessionExpirationSerializesRuntimeAttempts(t *testing.T) {
 		case <-ctx.Done():
 		}
 	}}
-	first, err := NewExpirationWorker(store, NewActorWorkflow(writes, actors, make(chan struct{}, 1), time.Second), time.Hour, time.Minute)
+	first, err := NewExpirationWorker(store, NewActorWorkflow(writes, actors, make(chan struct{}, 1), time.Second, noop.NewMeterProvider()), time.Hour, time.Minute)
 	require.NoError(t, err)
-	second, err := NewExpirationWorker(store, NewActorWorkflow(store, actors, make(chan struct{}, 1), time.Second), time.Hour, time.Minute)
+	second, err := NewExpirationWorker(store, NewActorWorkflow(store, actors, make(chan struct{}, 1), time.Second, noop.NewMeterProvider()), time.Hour, time.Minute)
 	require.NoError(t, err)
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)

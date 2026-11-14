@@ -19,7 +19,6 @@ import (
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	corev1 "k8s.io/api/core/v1"
 
 	runtimea2a "github.com/kagent-dev/kagent/go/adk/pkg/a2a"
 	runtimeRunner "github.com/kagent-dev/kagent/go/adk/pkg/runner"
@@ -138,7 +137,7 @@ func runCompiledMCPCLIFixture(t *testing.T, withSkills, mixed bool) {
 	harness, template := cliConfiguration()
 	template.Spec.Tools[0].MCP.Tools = []string{"record"}
 	if mixed {
-		template.Spec.Tools = append(template.Spec.Tools, v1alpha3.ToolBinding{MCP: &v1alpha3.MCPToolBinding{Server: corev1.TypedLocalObjectReference{Kind: "RemoteMCPServer", Name: "native"}, Tools: []string{"native_lookup"}}})
+		template.Spec.Tools = append(template.Spec.Tools, v1alpha3.ToolBinding{MCP: &v1alpha3.MCPToolBinding{Server: v1alpha3.MCPServerReference{Kind: new("RemoteMCPServer"), Name: "native"}, Tools: []string{"native_lookup"}}})
 	}
 	model := modelConfig()
 	model.Spec.Stream = new(false)

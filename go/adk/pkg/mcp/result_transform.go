@@ -25,12 +25,11 @@ func transformResult(ctx context.Context, result json.RawMessage) (json.RawMessa
 	return result, nil
 }
 
-func nativeResultClient(owner context.Context) *mcpsdk.Client {
+func addNativeResultTransformer(client *mcpsdk.Client, owner context.Context) {
 	transform, _ := owner.Value(resultTransformerKey{}).(ResultTransformer)
 	if transform == nil {
-		return nil
+		return
 	}
-	client := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "kagent-adk", Version: "1"}, nil)
 	client.AddSendingMiddleware(func(next mcpsdk.MethodHandler) mcpsdk.MethodHandler {
 		return func(ctx context.Context, method string, req mcpsdk.Request) (mcpsdk.Result, error) {
 			result, err := next(ctx, method, req)
@@ -53,5 +52,4 @@ func nativeResultClient(owner context.Context) *mcpsdk.Client {
 			return &adapted, nil
 		}
 	})
-	return client
 }

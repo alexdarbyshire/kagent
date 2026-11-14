@@ -38,10 +38,12 @@ func PrepareCLIEnvironment(owner context.Context, bindings []adk.MCPCLIConfig, p
 	resolvers := make(map[string]*headerRoundTripper, len(bindings))
 	for _, binding := range bindings {
 		headers, allowed := binding.HTTP.Params.Headers, binding.HTTP.AllowedHeaders
+		passthrough := binding.HTTP.TokenPassthrough
 		if binding.SSE != nil {
 			headers, allowed = binding.SSE.Params.Headers, binding.SSE.AllowedHeaders
+			passthrough = binding.SSE.TokenPassthrough
 		}
-		resolvers[binding.Name] = &headerRoundTripper{headers: headers, allowedHeaders: allowed, propagateToken: propagateToken, headerProvider: provider}
+		resolvers[binding.Name] = &headerRoundTripper{headers: headers, allowedHeaders: allowed, propagateToken: propagateToken, headerProvider: provider, tokenPassthrough: passthrough}
 	}
 	commands := &cliCommandRuntime{ctx: owner, lifecycle: ownerLifecycle, bindings: make(map[string]adk.MCPCLIConfig), resolvers: resolvers}
 	for _, binding := range bindings {
@@ -99,7 +101,11 @@ func PrepareCLIEnvironment(owner context.Context, bindings []adk.MCPCLIConfig, p
 				}
 				// Do not derive this context with WithTimeout: STS needs the
 				// SessionID method on the original ADK invocation context.
-				headers := resolver.resolveHeaders(invocation)
+				headers, err := resolver.resolveHeaders(invocation)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusUnauthorized)
+					return
+				}
 				propagation.TraceContext{}.Inject(invocation, propagation.HeaderCarrier(headers))
 				if lifetime.Err() != nil || invocation.Err() != nil {
 					http.Error(w, "MCP invocation ended", http.StatusGone)
@@ -145,7 +151,7 @@ func PrepareCLIEnvironment(owner context.Context, bindings []adk.MCPCLIConfig, p
 // never silently fall back to an unauthenticated command.
 func cliInvocationTransport(base http.RoundTripper, binding adk.MCPCLIConfig) (http.RoundTripper, error) {
 	socket, _ := os.LookupEnv(cliInvocationSocket) //nolint:forbidigo // Private per-process handoff, not a configurable runtime setting.
-	required := binding.RequiresInvocationHeaders || len(binding.HTTP.AllowedHeaders) > 0 || (binding.SSE != nil && len(binding.SSE.AllowedHeaders) > 0)
+	required := binding.RequiresInvocationHeaders || binding.HTTP.TokenPassthrough || (binding.SSE != nil && binding.SSE.TokenPassthrough) || len(binding.HTTP.AllowedHeaders) > 0 || (binding.SSE != nil && len(binding.SSE.AllowedHeaders) > 0)
 	if socket == "" {
 		if required {
 			return nil, errors.New("MCP command requires a live invocation header handoff")
@@ -184,7 +190,7 @@ func (c *cliInvocationRoundTripper) RoundTrip(request *http.Request) (*http.Resp
 	if err := json.NewDecoder(response.Body).Decode(&headers); err != nil {
 		return nil, fmt.Errorf("invalid MCP invocation header response: %w", err)
 	}
-	request = request.Clone(request.Context())
+	request = request.Clone(context.WithValue(request.Context(), lifecycleHeadersKey{}, true))
 	request = request.WithContext(propagation.TraceContext{}.Extract(request.Context(), propagation.HeaderCarrier(headers)))
 	for name, values := range headers {
 		request.Header[http.CanonicalHeaderKey(name)] = values

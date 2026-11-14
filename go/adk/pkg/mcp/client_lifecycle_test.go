@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -44,7 +45,8 @@ func TestNativeHostShutdownTerminatesOwnedConnection(t *testing.T) {
 	tools, err := toolsets[0].Tools(testReadonlyContext{Context: t.Context()})
 	require.NoError(t, err)
 	require.Len(t, tools, 1)
-	before := deletes.Load() // Metadata discovery has already released its connection.
+	require.Zero(t, deletes.Load(), "lazy discovery must retain its owned connection")
+	before := deletes.Load()
 	cancel()
 	require.Eventually(t, func() bool { return deletes.Load() > before }, 2*time.Second, 10*time.Millisecond, "host shutdown must release the native lazy toolset connection")
 }
@@ -106,7 +108,7 @@ func TestManagedShutdownReportsRemoteEvidence(t *testing.T) {
 			started := time.Now()
 			outcomes := owner.Close()
 			require.Less(t, time.Since(started), 1500*time.Millisecond)
-			require.Len(t, outcomes, 2) // Classification and native discovery both use SDK connections.
+			require.Len(t, outcomes, 1) // Lazy discovery opens one retained connection.
 			for _, outcome := range outcomes {
 				require.Equal(t, test.want, outcome.Status)
 				require.Equal(t, test.code, outcome.HTTPStatus)
@@ -139,7 +141,7 @@ func TestManagedShutdownBoundsManyHungRelationships(t *testing.T) {
 	owner := NewClientLifecycle(t.Context(), nil)
 	configs := make([]*configv1.ADKHTTPMCPServerConfig, 6)
 	for index := range configs {
-		configs[index] = &configv1.ADKHTTPMCPServerConfig{Params: &configv1.ADKHTTPConnectionParams{Url: remote.URL}}
+		configs[index] = &configv1.ADKHTTPMCPServerConfig{Params: &configv1.ADKHTTPConnectionParams{Url: remote.URL, Headers: map[string]string{"X-Binding": strconv.Itoa(index)}}}
 	}
 	toolsets := CreateToolsets(t.Context(), configs, nil, nil, false, nil, owner)
 	require.Len(t, toolsets, len(configs))
@@ -151,8 +153,9 @@ func TestManagedShutdownBoundsManyHungRelationships(t *testing.T) {
 	started := time.Now()
 	outcomes := owner.Close()
 	require.Less(t, time.Since(started), 1500*time.Millisecond, "total shutdown must not multiply by relationship count")
-	require.Len(t, outcomes, 12)
+	require.Len(t, outcomes, len(configs))
 	for _, outcome := range outcomes {
+		require.Equal(t, "timed_out", outcome.Status)
 		require.True(t, outcome.LocalReleased)
 	}
 }
@@ -190,7 +193,7 @@ func TestManagedShutdownRejectsInvocationOnlyAuthority(t *testing.T) {
 	require.NoError(t, err)
 	require.Greater(t, authorizedPosts.Load(), before, "the current tool call must still authenticate without provider custody")
 	outcomes := owner.Close()
-	require.Len(t, outcomes, 2)
+	require.Len(t, outcomes, 1)
 	require.Equal(t, "authority_unavailable", outcomes[len(outcomes)-1].Status)
 	for _, outcome := range outcomes {
 		require.True(t, outcome.LocalReleased)
@@ -204,9 +207,13 @@ func TestNativeSSEStreamOutlivesInvocationAndClosesWithHost(t *testing.T) {
 		return &mcpsdk.CallToolResult{}, nil
 	})
 	handler := mcpsdk.NewSSEHandler(func(*http.Request) *mcpsdk.Server { return server }, nil)
+	var started atomic.Int32
 	var finished atomic.Int32
 	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		require.Equal(t, "Bearer static", request.Header.Get("Authorization"))
+		if request.Method == http.MethodGet {
+			started.Add(1)
+		}
 		handler.ServeHTTP(w, request)
 		if request.Method == http.MethodGet {
 			finished.Add(1)
@@ -217,15 +224,17 @@ func TestNativeSSEStreamOutlivesInvocationAndClosesWithHost(t *testing.T) {
 	owner := NewClientLifecycle(t.Context(), nil)
 	toolsets := CreateToolsets(t.Context(), nil, []*configv1.ADKSSEMCPServerConfig{{Params: &configv1.ADKSSEConnectionParams{Url: remote.URL, Headers: map[string]string{"Authorization": "Bearer static"}}}}, nil, false, nil, owner)
 	require.Len(t, toolsets, 1)
-	require.Eventually(t, func() bool { return finished.Load() == 1 }, time.Second, 10*time.Millisecond)
+	require.Zero(t, started.Load(), "lazy construction must not open an SSE stream")
 	invocation, end := context.WithCancel(t.Context())
 	tools, err := toolsets[0].Tools(testReadonlyContext{Context: invocation})
 	require.NoError(t, err)
 	require.Len(t, tools, 1)
+	require.EqualValues(t, 1, started.Load(), "discovery opens one retained SSE stream")
 	end()
-	require.EqualValues(t, 1, finished.Load(), "ending discovery invocation must not close the retained SSE stream")
+	require.EqualValues(t, 0, finished.Load(), "ending discovery invocation must not close the retained SSE stream")
 	outcomes := owner.Close()
-	require.Eventually(t, func() bool { return finished.Load() == 2 }, time.Second, 10*time.Millisecond)
+	require.Len(t, outcomes, 1)
+	require.Eventually(t, func() bool { return finished.Load() == 1 }, time.Second, 10*time.Millisecond)
 	for _, outcome := range outcomes {
 		require.Equal(t, "unsupported_transport", outcome.Status)
 		require.True(t, outcome.LocalReleased)

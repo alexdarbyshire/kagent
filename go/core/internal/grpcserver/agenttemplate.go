@@ -121,12 +121,13 @@ func (s *agentTemplateServer) agentTemplate(template *v1alpha3.AgentTemplate) (*
 	}
 	var modelConfigRef *apiv1.ResourceReference
 	if template.Spec.ModelConfig != nil {
-		modelConfigRef = &apiv1.ResourceReference{Namespace: template.Namespace, Name: template.Spec.ModelConfig.Name}
+		// The response field carries no kind, so it only names ModelConfigs.
+		if kind, key := template.Spec.ModelConfig.Target(template.Namespace); kind == v1alpha3.ModelConfigGroupKind {
+			modelConfigRef = &apiv1.ResourceReference{Namespace: key.Namespace, Name: key.Name}
+		}
 	}
 	return &apiv1.AgentTemplate{
-		Ref: &apiv1.ResourceReference{Namespace: template.Namespace, Name: template.Name},
-		// The model config lives in the template's own namespace: the CRD's
-		// reference is name-only and same-namespace by construction.
+		Ref:            &apiv1.ResourceReference{Namespace: template.Namespace, Name: template.Name},
 		ModelConfigRef: modelConfigRef,
 		Resource:       resource,
 		Description:    template.Spec.Description,

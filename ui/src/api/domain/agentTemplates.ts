@@ -6,6 +6,23 @@ export interface AgentTemplateLocalRef {
   name: string;
 }
 
+/**
+ * A model or MCP reference, local when namespace is omitted. Omitted `group` and
+ * `kind` mean the default kind; the form keeps them so an edit cannot repoint a reference.
+ */
+export interface ObjectReference {
+  group?: string;
+  kind?: string;
+  name: string;
+  namespace?: string;
+}
+
+/** Display the full identity, resolving omitted namespaces against the owner. */
+export function referenceLabel(ref: ObjectReference | undefined, ownerNamespace: string): string {
+  if (!ref?.name) return "";
+  return `${ref.namespace || ownerNamespace}/${ref.name}`;
+}
+
 /** A key in a same-namespace ConfigMap. */
 export interface ConfigMapKeyRef {
   name: string;
@@ -19,7 +36,8 @@ export interface ConfigMapKeyRef {
  * non-empty list limits the binding to those names.
  */
 export interface McpToolBinding {
-  server: { kind: "RemoteMCPServer"; name: string };
+  /** The API server stores `kind: RemoteMCPServer` when it is omitted. */
+  server: ObjectReference;
   tools?: string[];
   requireApproval?: boolean;
 }
@@ -92,8 +110,8 @@ export interface AgentTemplatePromptSpec {
  * the existing spec rather than replacing it.
  */
 export interface AgentTemplateSpec {
-  /** A ModelConfig in the template's own namespace. Only BYO harnesses run without one. */
-  modelConfig?: AgentTemplateLocalRef;
+  /** An authorized ModelConfig, local unless a namespace is specified. Only BYO harnesses run without one. */
+  modelConfig?: ObjectReference;
   description?: string;
   /** Mutually exclusive with `systemPromptFrom` — the CRD rejects both. */
   systemPrompt?: string;
@@ -105,6 +123,8 @@ export interface AgentTemplateSpec {
   outputSchema?: Record<string, unknown>;
   /** A same-namespace ConfigMap key containing the output schema as JSON. */
   outputSchemaFrom?: ConfigMapKeyRef;
+  /** Tells OpenAI, Azure OpenAI, and Foundry (OpenAI format) to limit generation to the schema. Requires a schema. */
+  outputSchemaStrict?: boolean;
   promptTemplate?: AgentTemplatePromptSpec;
   tools?: ToolBinding[];
   skills?: AgentTemplateSkill[];

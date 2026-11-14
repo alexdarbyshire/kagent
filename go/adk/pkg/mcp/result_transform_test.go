@@ -1,4 +1,4 @@
-package mcp
+package mcp_test
 
 import (
 	"bytes"
@@ -16,6 +16,7 @@ import (
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/require"
 
+	"github.com/kagent-dev/kagent/go/adk/pkg/mcp"
 	"github.com/kagent-dev/kagent/go/adk/pkg/tools"
 	"github.com/kagent-dev/kagent/go/api/adk"
 )
@@ -40,7 +41,7 @@ func TestCommandResultAdapterReceivesCurrentCallerAndNeverReplaysFailure(t *test
 	require.NoError(t, os.WriteFile(file, data, 0600))
 	owner, cancel := context.WithCancel(t.Context())
 	t.Cleanup(cancel)
-	owner = WithResultTransformer(owner, func(ctx context.Context, data json.RawMessage) (json.RawMessage, error) {
+	owner = mcp.WithResultTransformer(owner, func(ctx context.Context, data json.RawMessage) (json.RawMessage, error) {
 		caller, ok := ctx.(interface{ SessionID() string })
 		require.True(t, ok, "original caller methods survive cancellation wrappers")
 		require.Contains(t, string(data), "9007199254740993")
@@ -52,19 +53,21 @@ func TestCommandResultAdapterReceivesCurrentCallerAndNeverReplaysFailure(t *test
 		result["adapted"] = json.RawMessage(`true`)
 		return json.Marshal(result)
 	})
-	executor := tools.NewCommandExecutor(tools.ExecutionConfig{PrepareEnvironment: PrepareCLIEnvironment(owner, []adk.MCPCLIConfig{binding}, false, nil)})
+	executor := tools.NewCommandExecutor(tools.ExecutionConfig{PrepareEnvironment: mcp.PrepareCLIEnvironment(owner, []adk.MCPCLIConfig{binding}, false, nil)})
 	command := fmt.Sprintf("%q --binding-file %q read", binary, file)
 	result, err := executor.ExecuteCommand(cliSessionContext{Context: t.Context(), id: "alice"}, command, directory)
 	require.NoError(t, err)
 	require.Contains(t, result, `"adapted":true`)
 	require.Contains(t, result, "9007199254740993")
-	_, err = executor.ExecuteCommand(cliSessionContext{Context: t.Context(), id: "bob"}, command, directory)
-	require.ErrorContains(t, err, "adapter refused Bob")
+	result, err = executor.ExecuteCommand(cliSessionContext{Context: t.Context(), id: "bob"}, command, directory)
+	require.ErrorContains(t, err, "command failed with exit code 1")
+	require.Contains(t, result, "adapter refused Bob")
+	require.Contains(t, result, "operation not replayed")
 	require.Equal(t, int32(2), calls.Load())
 	for _, caller := range []string{"alice", "bob"} {
 		for _, save := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/save=%t", caller, save), func(t *testing.T) {
-				env, cleanup, err := PrepareCLIEnvironment(owner, []adk.MCPCLIConfig{binding}, false, nil)(cliSessionContext{Context: t.Context(), id: caller}, t.Context())
+				env, cleanup, err := mcp.PrepareCLIEnvironment(owner, []adk.MCPCLIConfig{binding}, false, nil)(cliSessionContext{Context: t.Context(), id: caller}, t.Context())
 				require.NoError(t, err)
 				defer cleanup()
 				args := []string{"--binding-file", file, "read"}

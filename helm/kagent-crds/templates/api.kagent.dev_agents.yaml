@@ -52,6 +52,36 @@ spec:
               are local to the Agent's namespace, including references nested in inline
               template specs.
             properties:
+              egressPolicyRefs:
+                description: |-
+                  EgressPolicyRefs grants additional access to the whole runtime, including
+                  shared subagents. Policies resolve in this Agent's namespace. Integration
+                  access inferred from models and tools is always included. Changes update
+                  existing Sessions without a new invocation or runtime restart.
+                items:
+                  description: |-
+                    LocalObjectReference contains enough information to let you locate the
+                    referenced object inside the same namespace.
+                  properties:
+                    name:
+                      default: ""
+                      description: |-
+                        Name of the referent.
+                        This field is effectively required, but due to backwards compatibility is
+                        allowed to be empty. Instances of this type with an empty value here are
+                        almost certainly wrong.
+                        More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                      type: string
+                  type: object
+                  x-kubernetes-map-type: atomic
+                maxItems: 16
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
+                x-kubernetes-validations:
+                - message: egressPolicyRefs requires non-empty names
+                  rule: self.all(ref, has(ref.name) && ref.name != '')
               harnessRef:
                 description: |-
                   HarnessRef selects the platform-managed runtime configuration that executes
@@ -85,20 +115,39 @@ spec:
                         description: ModelConfig is required by managed harnesses
                           and optional for BYO harnesses.
                         properties:
-                          name:
-                            default: ""
-                            description: |-
-                              Name of the referent.
-                              This field is effectively required, but due to backwards compatibility is
-                              allowed to be empty. Instances of this type with an empty value here are
-                              almost certainly wrong.
-                              More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                          group:
+                            description: Group is the referenced API group. It defaults
+                              to api.kagent.dev.
+                            maxLength: 253
+                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                             type: string
+                          kind:
+                            description: Kind is the referenced kind. It defaults
+                              to ModelConfig.
+                            maxLength: 63
+                            minLength: 1
+                            pattern: ^[a-zA-Z]([-a-zA-Z0-9]*[a-zA-Z0-9])?$
+                            type: string
+                          name:
+                            description: Name is the referenced model's name.
+                            maxLength: 253
+                            minLength: 1
+                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                            type: string
+                          namespace:
+                            description: Namespace is the referenced model's namespace.
+                              Empty means the owner's namespace.
+                            maxLength: 63
+                            pattern: ^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                            type: string
+                        required:
+                        - name
                         type: object
-                        x-kubernetes-map-type: atomic
                         x-kubernetes-validations:
-                        - message: name must not be empty
-                          rule: has(self.name) && self.name != ''
+                        - message: a group other than api.kagent.dev requires its
+                            own kind
+                          rule: '!has(self.group) || self.group == ''api.kagent.dev''
+                            || (has(self.kind) && self.kind != ''ModelConfig'')'
                       outputSchema:
                         description: |-
                           OutputSchema constrains successful terminal output when this template is
@@ -120,6 +169,12 @@ spec:
                         - key
                         - name
                         type: object
+                      outputSchemaStrict:
+                        description: |-
+                          OutputSchemaStrict tells OpenAI, Azure OpenAI, and Foundry (openai format)
+                          to limit generation to the output schema. kagent then checks the schema
+                          against OpenAI's strict mode rules on every provider.
+                        type: boolean
                       plugins:
                         items:
                           description: PluginBundle selects Agent Skills from one
@@ -351,7 +406,7 @@ spec:
                             tool source.
                           properties:
                             mcp:
-                              description: MCPToolBinding binds tools from a same-namespace
+                              description: MCPToolBinding binds tools from an authorized
                                 MCP server.
                               properties:
                                 exposeAsCLI:
@@ -366,34 +421,50 @@ spec:
                                     Tools is omitted or empty.
                                   type: boolean
                                 server:
-                                  description: |-
-                                    TypedLocalObjectReference contains enough information to let you locate the
-                                    typed referenced object inside the same namespace.
+                                  description: Server is the MCP server that provides
+                                    the tools.
                                   properties:
                                     apiGroup:
                                       description: |-
-                                        APIGroup is the group for the resource being referenced.
-                                        If APIGroup is not specified, the specified Kind must be in the core API group.
-                                        For any other third-party types, APIGroup is required.
+                                        APIGroup is not supported.
+
+                                        Deprecated: use Group.
+                                      type: string
+                                    group:
+                                      description: Group is the referenced API group.
+                                        It defaults to api.kagent.dev.
+                                      maxLength: 253
+                                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                                       type: string
                                     kind:
-                                      description: Kind is the type of resource being
-                                        referenced
+                                      default: RemoteMCPServer
+                                      description: Kind is the referenced kind. It
+                                        defaults to RemoteMCPServer.
+                                      maxLength: 63
+                                      minLength: 1
+                                      pattern: ^[a-zA-Z]([-a-zA-Z0-9]*[a-zA-Z0-9])?$
                                       type: string
                                     name:
-                                      description: Name is the name of resource being
-                                        referenced
+                                      description: Name is the referenced server's
+                                        name.
+                                      maxLength: 253
+                                      minLength: 1
+                                      type: string
+                                    namespace:
+                                      description: Namespace is the referenced server's
+                                        namespace. Empty means the owner's namespace.
+                                      maxLength: 63
                                       type: string
                                   required:
-                                  - kind
                                   - name
                                   type: object
-                                  x-kubernetes-map-type: atomic
                                   x-kubernetes-validations:
-                                  - message: kind must be RemoteMCPServer
-                                    rule: self.kind == 'RemoteMCPServer'
-                                  - message: apiGroup must be omitted
+                                  - message: use group instead of apiGroup
                                     rule: '!has(self.apiGroup)'
+                                  - message: a group other than api.kagent.dev requires
+                                      its own kind
+                                    rule: '!has(self.group) || self.group == ''api.kagent.dev''
+                                      || (has(self.kind) && self.kind != ''RemoteMCPServer'')'
                                 tools:
                                   description: |-
                                     Tools optionally limits which server tools are exposed. An omitted or empty
@@ -453,6 +524,9 @@ spec:
                         type: array
                     type: object
                     x-kubernetes-validations:
+                    - message: outputSchemaStrict requires outputSchema or outputSchemaFrom
+                      rule: '!has(self.outputSchemaStrict) || !self.outputSchemaStrict
+                        || has(self.outputSchema) || has(self.outputSchemaFrom)'
                     - message: at most one of the fields in [systemPrompt systemPromptFrom]
                         may be set
                       rule: (has(self.systemPrompt)?1:0)+(has(self.systemPromptFrom)?1:0)
@@ -492,6 +566,11 @@ spec:
             description: AgentStatus reports compilation and preparation of an Agent.
             properties:
               conditions:
+                description: |-
+                  Conditions report runtime readiness and independent egress grant admission.
+                  EgressPoliciesApplied is False for EgressPolicyNotFound, InvalidEgressPolicy,
+                  or EgressGrantConflict; Applied means all grants are admitted. Grant issues
+                  do not affect Ready.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -546,7 +625,7 @@ spec:
                   - status
                   - type
                   type: object
-                maxItems: 4
+                maxItems: 5
                 type: array
                 x-kubernetes-list-map-keys:
                 - type

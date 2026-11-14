@@ -29,7 +29,9 @@ expiry or idle eviction, or revive custody after eviction/replacement. Propagate
 mode uses the same existing cache. Context-only forwarded credentials do not grant
 lifecycle authority. Configured static Authorization retains its precedence over
 provider credentials; current invocation propagation, allowed headers, dynamic
-provider, and static headers retain their existing order.
+provider, and static headers retain their existing order. Caller-token passthrough
+overrides Authorization with the current caller token and cannot authorize
+detached lifecycle traffic; those connections do not open a standalone stream.
 
 ## Shutdown Evidence
 

@@ -24,8 +24,8 @@ func TestLifecycleAuthorityProviderCustody(t *testing.T) {
 			}
 			p := NewTokenPropagationPlugin(integration, slog.New(slog.DiscardHandler), nil, nil)
 			ctx, cancel := context.WithCancel(context.WithValue(context.Background(), models.BearerTokenKey, "alice"))
-			invocation := &fakeInvocationContext{Context: ctx, sessionID: "session"}
-			request := fakeSessionContext{Context: ctx, sessionID: "session"}
+			invocation := &fakeInvocationContext{Context: models.WithSessionID(ctx, "session"), sessionID: "session"}
+			request := models.WithSessionID(ctx, "session")
 			if p.LifecycleAuthority(request) != nil {
 				t.Fatal("context-only authority acquired provider custody")
 			}
@@ -46,7 +46,7 @@ func TestLifecycleAuthorityProviderCustody(t *testing.T) {
 			if err != nil || headers["Authorization"] != want {
 				t.Fatalf("headers=%v err=%v", headers, err)
 			}
-			other := fakeSessionContext{Context: context.WithValue(context.Background(), models.BearerTokenKey, "bob"), sessionID: "session"}
+			other := models.WithSessionID(context.WithValue(context.Background(), models.BearerTokenKey, "bob"), "session")
 			if p.LifecycleAuthority(other) != nil {
 				t.Fatal("another subject obtained custody")
 			}
@@ -74,7 +74,7 @@ func TestLifecycleAuthorityDoesNotRenewOrIgnoreExpiry(t *testing.T) {
 		t.Run(deadline, func(t *testing.T) {
 			p := NewTokenPropagationPlugin(nil, slog.New(slog.DiscardHandler), nil, nil)
 			p.setCachedToken("session", subjectKey("alice"), "held", 0)
-			ctx := fakeSessionContext{Context: context.WithValue(context.Background(), models.BearerTokenKey, "alice"), sessionID: "session"}
+			ctx := models.WithSessionID(context.WithValue(context.Background(), models.BearerTokenKey, "alice"), "session")
 			authority := p.LifecycleAuthority(ctx)
 			p.mu.Lock()
 			entry := p.tokenCache[cacheKey{"session", subjectKey("alice")}]
@@ -112,10 +112,10 @@ func TestLifecycleAuthorityRetainsCallerExpiry(t *testing.T) {
 			p := NewTokenPropagationPlugin(integration, slog.New(slog.DiscardHandler), nil, nil)
 			bearer := signedTokenExpiringIn(t, "alice", 30*time.Second)
 			ctx := context.WithValue(context.Background(), models.BearerTokenKey, bearer)
-			if _, err := p.BeforeRunCallback(&fakeInvocationContext{Context: ctx, sessionID: "session"}); err != nil {
+			if _, err := p.BeforeRunCallback(&fakeInvocationContext{Context: models.WithSessionID(ctx, "session"), sessionID: "session"}); err != nil {
 				t.Fatal(err)
 			}
-			authority := p.LifecycleAuthority(fakeSessionContext{Context: ctx, sessionID: "session"})
+			authority := p.LifecycleAuthority(models.WithSessionID(ctx, "session"))
 			if authority == nil {
 				t.Fatal("valid caller authority unavailable")
 			}

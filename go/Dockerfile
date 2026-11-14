@@ -1,22 +1,18 @@
 ### STAGE 1: base image
 ARG BASE_IMAGE_REGISTRY=cgr.dev
+ARG ALPINE_VERSION=3.24
 ARG BUILDPLATFORM
 FROM --platform=$BUILDPLATFORM $BASE_IMAGE_REGISTRY/chainguard/go:latest AS builder
 ARG TARGETARCH
 ARG TARGETPLATFORM
 ARG BUILDPLATFORM
 
-# Which package to build (e.g. core/cmd/controller/main.go, adk/cmd/main.go)
-ARG BUILD_PACKAGE=core/cmd/controller/main.go
+# Which package to build (e.g. ./core/cmd/controller, ./adk/cmd)
+ARG BUILD_PACKAGE=./core/cmd/controller
 
 WORKDIR /workspace
 # Copy the Go module manifests
 COPY go.mod go.sum .
-# cache deps before building and copying source so that we don't need to re-download as much
-# and so that source changes don't invalidate our downloaded layer
-RUN --mount=type=cache,target=/root/go/pkg/mod,rw      \
-    --mount=type=cache,target=/root/.cache/go-build,rw \
-     go mod download
 # Copy all source
 COPY api/ api/
 COPY core/ core/
@@ -39,17 +35,23 @@ RUN --mount=type=cache,target=/root/go/pkg/mod,rw \
     fi
 
 ### STAGE 2: final image
-FROM alpine:3.24
+FROM alpine:${ALPINE_VERSION}
 ARG TARGETPLATFORM
 
+# The runtime user gets a passwd entry and a home it owns: commands an agent
+# runs (git config --global, CLIs that keep a config under $HOME/.config)
+# write there.
 RUN apk upgrade --no-cache && apk add --no-cache bash ca-certificates git && \
-    mkdir -p /skills /plugins /data/plugins && \
-    chown -R 65532:65532 /skills /plugins /data
+    addgroup -S -g 65532 kagent && \
+    adduser -S -D -u 65532 -G kagent -h /home/kagent kagent && \
+    mkdir -p /config /skills /plugins /data/plugins && \
+    chown -R 65532:65532 /config /skills /plugins /data
 
 WORKDIR /
 COPY --from=builder /app /app
 COPY --from=builder /runtime-tools/ /usr/local/bin/
 USER 65532:65532
+ENV HOME=/home/kagent
 ARG VERSION
 
 LABEL org.opencontainers.image.source=https://github.com/kagent-dev/kagent

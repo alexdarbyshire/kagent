@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -276,8 +277,11 @@ func TestAnthropicModelGenerateContentSendsStructuredOutputWithTools(t *testing.
 		t.Fatal(err)
 	}
 	schema := map[string]any{
-		"type":                 "object",
-		"properties":           map[string]any{"answer": map[string]any{"type": "integer"}},
+		"type": "object",
+		"properties": map[string]any{
+			"answer": map[string]any{"type": "integer"},
+			"due":    map[string]any{"type": "string", "format": "date-time", "pattern": "^2026-"},
+		},
 		"required":             []any{"answer"},
 		"additionalProperties": false,
 	}
@@ -307,7 +311,52 @@ func TestAnthropicModelGenerateContentSendsStructuredOutputWithTools(t *testing.
 	if gotSchema, ok := format["schema"].(map[string]any); !ok || gotSchema["additionalProperties"] != false {
 		t.Fatalf("output_config.format.schema = %#v", format["schema"])
 	}
+	due := format["schema"].(map[string]any)["properties"].(map[string]any)["due"]
+	if want := map[string]any{"type": "string", "format": "date-time", "pattern": "^2026-"}; !reflect.DeepEqual(due, want) {
+		t.Fatalf("output_config.format.schema due = %#v, want %#v", due, want)
+	}
 	if tools, ok := body["tools"].([]any); !ok || len(tools) != 1 {
 		t.Fatalf("tools = %#v, want one tool", body["tools"])
 	}
+}
+
+func TestAnthropicStreamingToolCallsKeepBlockOrder(t *testing.T) {
+	const n = 8
+	events := []string{
+		`{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-sonnet-4-6","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":4,"output_tokens":1}}}`,
+	}
+	var wantIDs []string
+	for i := range n {
+		id := "call-" + string(rune('a'+i))
+		wantIDs = append(wantIDs, id)
+		events = append(events,
+			`{"type":"content_block_start","index":`+string(rune('0'+i))+`,"content_block":{"type":"tool_use","id":"`+id+`","name":"tool_`+string(rune('a'+i))+`","input":{}}}`,
+			`{"type":"content_block_delta","index":`+string(rune('0'+i))+`,"delta":{"type":"input_json_delta","partial_json":"{}"}}`,
+			`{"type":"content_block_stop","index":`+string(rune('0'+i))+`}`,
+		)
+	}
+	events = append(events,
+		`{"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":5}}`,
+		`{"type":"message_stop"}`,
+	)
+	m, _ := anthropicTestServer(t, func(w http.ResponseWriter) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		for _, event := range events {
+			var envelope struct {
+				Type string `json:"type"`
+			}
+			require.NoError(t, json.Unmarshal([]byte(event), &envelope))
+			_, _ = io.WriteString(w, "event: "+envelope.Type+"\ndata: "+event+"\n\n")
+		}
+	})
+
+	final := finalResponse(t, m, true)
+
+	var gotIDs []string
+	for _, p := range final.Content.Parts {
+		if p.FunctionCall != nil {
+			gotIDs = append(gotIDs, p.FunctionCall.ID)
+		}
+	}
+	assert.Equal(t, wantIDs, gotIDs)
 }

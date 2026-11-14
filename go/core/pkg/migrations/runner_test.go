@@ -319,8 +319,19 @@ func TestBuiltinMigrationsRoundTrip(t *testing.T) {
 	}
 	for _, source := range sources {
 		expected := []int64{0, 1}
+		if source.Name == "core" {
+			expected = append(expected, 2, 3)
+		}
 		if versions := testVersions(t, dsn, source.TrackingTable); !slices.Equal(versions, expected) {
 			t.Fatalf("%s versions = %v, want %v", source.Name, versions, expected)
+		}
+	}
+	if !testColumnExists(t, dsn, "runtime_revision", "token_passthrough_targets") || !testColumnExists(t, dsn, "agent_runtime_revision", "token_passthrough_targets") {
+		t.Fatal("runtime and agent revisions must expose passthrough targets")
+	}
+	for _, table := range []string{"agent_definition", "sandbox_template_definition"} {
+		if !testColumnExists(t, dsn, table, "grant_destinations") || !testColumnExists(t, dsn, table, "grant_credentials") {
+			t.Fatalf("%s source grants are missing", table)
 		}
 	}
 	if !testColumnExists(t, dsn, "session", "deletion_reason") {

@@ -1,4 +1,5 @@
 ARG BASE_IMAGE_REGISTRY=cgr.dev
+ARG ALPINE_VERSION=3.24
 ARG BUILDPLATFORM
 FROM --platform=$BUILDPLATFORM ${BASE_IMAGE_REGISTRY}/chainguard/go:latest AS builder
 ARG TARGETARCH
@@ -6,9 +7,6 @@ ARG TARGETOS
 
 WORKDIR /workspace
 COPY go.mod go.sum ./
-RUN --mount=type=cache,target=/root/go/pkg/mod,rw \
-    --mount=type=cache,target=/root/.cache/go-build,rw \
-    go mod download
 COPY api/ api/
 COPY adk/ adk/
 COPY core/ core/
@@ -19,7 +17,7 @@ RUN --mount=type=cache,target=/root/go/pkg/mod,rw \
     CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
     go build -trimpath -o /kagent-codex ./harness/codex/cmd
 
-FROM alpine:3.22
+FROM alpine:${ALPINE_VERSION}
 ARG CODEX_CLI_VERSION=0.161.0
 ARG CODEX_CLI_AMD64_SHA256=04d8ab9dbcb9df0edf3c67dca5072a374babfdf762a9bc4ae649ae140b8e2cf0
 ARG CODEX_CLI_ARM64_SHA256=3c02e2ae34be0d06e62557e98fc5c0a783bec5a2fed406fe00e565803bf84ee8
@@ -45,7 +43,8 @@ RUN apk upgrade --no-cache && apk add --no-cache bash ca-certificates git libgcc
 COPY --from=builder /kagent-codex /usr/local/bin/kagent-codex
 
 USER 65532:65532
-WORKDIR /data/workspace
+# The adapter creates its workspace after the durable /data volume is mounted.
+WORKDIR /data
 EXPOSE 80 8081
 
 LABEL org.opencontainers.image.source="https://github.com/kagent-dev/kagent"

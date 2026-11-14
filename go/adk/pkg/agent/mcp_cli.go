@@ -82,7 +82,7 @@ func materializeCLI(root *configv1.ADKAgentConfig, invocationHeaders, disableBas
 			if binding.HTTP.RequireApproval || (binding.SSE != nil && binding.SSE.RequireApproval) {
 				return nil, fmt.Errorf("MCP CLI binding %q does not support require_approval: true", binding.Name)
 			}
-			binding.RequiresInvocationHeaders = invocationHeaders || len(binding.HTTP.AllowedHeaders) > 0 || (binding.SSE != nil && len(binding.SSE.AllowedHeaders) > 0)
+			binding.RequiresInvocationHeaders = invocationHeaders || binding.HTTP.TokenPassthrough || (binding.SSE != nil && binding.SSE.TokenPassthrough) || len(binding.HTTP.AllowedHeaders) > 0 || (binding.SSE != nil && len(binding.SSE.AllowedHeaders) > 0)
 			file := filepath.Join(private, binding.Name+".json")
 			data, err := json.Marshal(binding)
 			if err != nil {

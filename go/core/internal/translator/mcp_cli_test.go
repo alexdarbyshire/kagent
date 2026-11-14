@@ -26,7 +26,7 @@ func TestCompileAgentCLIRequiresDigestPinnedGoImage(t *testing.T) {
 		Substrate: v1alpha3.RuntimeSubstratePolicy{WorkerPoolRef: corev1.LocalObjectReference{Name: "default"}},
 	}}
 	template := &v1alpha3.AgentTemplate{ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: "test"}, Spec: v1alpha3.AgentTemplateSpec{
-		ModelConfig: &corev1.LocalObjectReference{Name: "default-model"}, Tools: []v1alpha3.ToolBinding{{MCP: &binding}},
+		ModelConfig: &v1alpha3.ModelConfigReference{Name: "default-model"}, Tools: []v1alpha3.ToolBinding{{MCP: &binding}},
 	}}
 	_, err := compiler(t, harness, modelConfig(), remoteMCPServer("browser", "http://browser.example/mcp")).CompileAgent(t.Context(), inlineAgent(harness, template))
 	require.ErrorContains(t, err, "pinned by sha256 digest")
@@ -76,8 +76,8 @@ func cliConfiguration() (*v1alpha3.Harness, *v1alpha3.AgentTemplate) {
 		Substrate: v1alpha3.RuntimeSubstratePolicy{WorkerPoolRef: corev1.LocalObjectReference{Name: "default"}},
 	}}
 	template := &v1alpha3.AgentTemplate{ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: "test"}, Spec: v1alpha3.AgentTemplateSpec{
-		ModelConfig: &corev1.LocalObjectReference{Name: "default-model"}, Tools: []v1alpha3.ToolBinding{{MCP: &v1alpha3.MCPToolBinding{
-			Server: corev1.TypedLocalObjectReference{Kind: "RemoteMCPServer", Name: "browser"}, ExposeAsCLI: new(true), Tools: []string{"navigate"},
+		ModelConfig: &v1alpha3.ModelConfigReference{Name: "default-model"}, Tools: []v1alpha3.ToolBinding{{MCP: &v1alpha3.MCPToolBinding{
+			Server: v1alpha3.MCPServerReference{Kind: new("RemoteMCPServer"), Name: "browser"}, ExposeAsCLI: new(true), Tools: []string{"navigate"},
 		}}},
 	}}
 	return harness, template
@@ -89,7 +89,7 @@ func cliCompiler(t *testing.T, harness *v1alpha3.Harness, objects ...any) *v2tra
 	ctx := krt.TestingDummyContext{}
 	return v2translator.NewCompiler(ctx, collections, map[v2translator.HarnessType]v2translator.HarnessCompiler{
 		v2translator.HarnessTypeKagent: kagenttranslator.NewCompiler(ctx, collections, testRuntimeDefaults()),
-	}, testHarnessImages)
+	}, testHarnessImages, testRuntimeDefaults())
 }
 
 func TestCompileAgentCLIRejectsUnsupportedAndCollidingBindings(t *testing.T) {
@@ -148,7 +148,7 @@ func TestCompileAgentCLISharedAndReferencedConfiguration(t *testing.T) {
 			child := root.DeepCopy()
 			child.Name = "child-template"
 			root.Spec.Tools = append(root.Spec.Tools, v1alpha3.ToolBinding{SubAgent: &v1alpha3.SubAgentToolBinding{Name: "child", Description: "Delegate", TemplateRef: &corev1.LocalObjectReference{Name: child.Name}}})
-			root.Spec.Tools = append(root.Spec.Tools, v1alpha3.ToolBinding{MCP: &v1alpha3.MCPToolBinding{Server: corev1.TypedLocalObjectReference{Kind: "RemoteMCPServer", Name: "native"}, RequireApproval: true}})
+			root.Spec.Tools = append(root.Spec.Tools, v1alpha3.ToolBinding{MCP: &v1alpha3.MCPToolBinding{Server: v1alpha3.MCPServerReference{Kind: new("RemoteMCPServer"), Name: "native"}, RequireApproval: true}})
 			s := remoteMCPServer("browser", "https://browser.example/mcp")
 			native := remoteMCPServer("native", "https://native.example/mcp")
 			publicAgent := inlineAgent(h, root)

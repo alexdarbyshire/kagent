@@ -144,6 +144,7 @@ func TestRunnerReportsLostMCPRelationshipWithoutReplay(t *testing.T) {
 		t.Run(fmt.Sprintf("cli=%t/missing=%t", cli, missing), func(t *testing.T) {
 			var mu sync.Mutex
 			var sessions, mutations int
+			var callSessions []string
 			peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.Method != http.MethodPost {
 					w.WriteHeader(405)
@@ -173,6 +174,7 @@ func TestRunnerReportsLostMCPRelationshipWithoutReplay(t *testing.T) {
 				case "tools/list":
 					result = `{"tools":[{"name":"mutate","inputSchema":{"type":"object"}},{"name":"read","inputSchema":{"type":"object"}}]}`
 				case "tools/call":
+					callSessions = append(callSessions, r.Header.Get("Mcp-Session-Id"))
 					mutations++
 					if mutations == 1 {
 						if missing {
@@ -198,14 +200,19 @@ func TestRunnerReportsLostMCPRelationshipWithoutReplay(t *testing.T) {
 			run, _ := newBrowserRunnerFixture(t, cli, peer.URL)
 			require.Contains(t, run("alice", "mutate"), "state lost")
 			mu.Lock()
-			require.Equal(t, 1, mutations, "an ambiguous remote action is never replayed")
-			firstSessions := sessions
+			firstMutations := mutations
 			mu.Unlock()
-			require.Contains(t, run("alice", "read"), "fresh relationship", "only subsequent deliberate work establishes new custody")
+			require.Equal(t, 1, firstMutations, "an ambiguous remote action is never replayed")
+			require.Contains(t, run("alice", "read"), "fresh relationship")
 			mu.Lock()
-			require.Greater(t, sessions, firstSessions)
-			require.Equal(t, 2, mutations)
+			finalMutations := mutations
+			observedSessions := append([]string(nil), callSessions...)
 			mu.Unlock()
+			require.Equal(t, 2, finalMutations)
+			require.Len(t, observedSessions, 2)
+			require.NotEmpty(t, observedSessions[0])
+			require.NotEmpty(t, observedSessions[1])
+			require.NotEqual(t, observedSessions[0], observedSessions[1], "subsequent deliberate work must use fresh custody after the failed action")
 		})
 	}
 }

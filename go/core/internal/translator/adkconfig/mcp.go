@@ -5,32 +5,33 @@ import (
 	"slices"
 
 	"google.golang.org/protobuf/types/known/durationpb"
+	"k8s.io/utils/ptr"
 
 	configv1 "github.com/kagent-dev/kagent/go/api/gen/kagent/config/v1"
 	"github.com/kagent-dev/kagent/go/api/v1alpha3"
-	v2translator "github.com/kagent-dev/kagent/go/core/internal/translator"
+	"github.com/kagent-dev/kagent/go/core/internal/translator"
 )
 
 func (c *Builder) addCLI(config *configv1.ADKAgentConfig, server *v1alpha3.RemoteMCPServer, binding v1alpha3.MCPToolBinding, headers map[string]string) error {
 	isSSE := server.Spec.Protocol == v1alpha3.RemoteMCPServerProtocolSse
 	if server.Spec.Protocol != "" && server.Spec.Protocol != v1alpha3.RemoteMCPServerProtocolStreamableHttp && !isSSE {
-		return v2translator.NewValidationError("MCP CLI binding %q requires Streamable HTTP or SSE", server.Name)
+		return translator.NewValidationError("MCP CLI binding %q requires Streamable HTTP or SSE", server.Name)
 	}
 	if !isSSE && server.Spec.SseReadTimeout != nil {
-		return v2translator.NewValidationError("MCP CLI Streamable HTTP binding %q does not support sseReadTimeout", server.Name)
+		return translator.NewValidationError("MCP CLI Streamable HTTP binding %q does not support sseReadTimeout", server.Name)
 	}
 	if !isSSE && server.Spec.TerminateOnClose != nil && !*server.Spec.TerminateOnClose {
-		return v2translator.NewValidationError("MCP CLI binding %q requires terminateOnClose: true", server.Name)
+		return translator.NewValidationError("MCP CLI binding %q requires terminateOnClose: true", server.Name)
 	}
 	endpoint, err := url.Parse(server.Spec.URL)
 	if err != nil || (endpoint.Scheme != "http" && endpoint.Scheme != "https") || endpoint.Host == "" || endpoint.User != nil || endpoint.Fragment != "" {
-		return v2translator.NewValidationError("MCP CLI binding %q requires an absolute HTTP(S) endpoint without user information or fragment", server.Name)
+		return translator.NewValidationError("MCP CLI binding %q requires an absolute HTTP(S) endpoint without user information or fragment", server.Name)
 	}
 	if server.Spec.Timeout != nil && server.Spec.Timeout.Duration <= 0 {
-		return v2translator.NewValidationError("MCP CLI binding %q requires a positive timeout", server.Name)
+		return translator.NewValidationError("MCP CLI binding %q requires a positive timeout", server.Name)
 	}
 	if isSSE && server.Spec.SseReadTimeout != nil && server.Spec.SseReadTimeout.Duration <= 0 {
-		return v2translator.NewValidationError("MCP CLI binding %q requires a positive sseReadTimeout", server.Name)
+		return translator.NewValidationError("MCP CLI binding %q requires a positive sseReadTimeout", server.Name)
 	}
 	// Reuse the native projection so HTTP settings retain one source of truth.
 	native := &configv1.ADKAgentConfig{}
@@ -53,6 +54,9 @@ func (c *Builder) addCLI(config *configv1.ADKAgentConfig, server *v1alpha3.Remot
 // This path intentionally has no proxy URL or egress-gateway indirection.
 func (c *Builder) addRemoteMCPServer(config *configv1.ADKAgentConfig, server *v1alpha3.RemoteMCPServer, tools []string, requireApproval bool, headers map[string]string) error {
 	targetURL := server.Spec.URL
+	if server.Spec.ActorJWT != nil {
+		headers = translator.MCPActorJWTHeaders(headers)
+	}
 
 	switch server.Spec.Protocol {
 	case v1alpha3.RemoteMCPServerProtocolSse:
@@ -66,6 +70,7 @@ func (c *Builder) addRemoteMCPServer(config *configv1.ADKAgentConfig, server *v1
 		params.TlsInsecureSkipVerify = tlsInsecureSkipVerify(server.Spec.TLS)
 		config.SseTools = append(config.SseTools, &configv1.ADKSSEMCPServerConfig{
 			Params: params, Tools: tools, RequireApproval: requireApproval,
+			TokenPassthrough: ptr.Deref(server.Spec.TokenPassthrough, false),
 		})
 	default:
 		params := &configv1.ADKHTTPConnectionParams{Url: targetURL, Headers: headers}
@@ -81,6 +86,7 @@ func (c *Builder) addRemoteMCPServer(config *configv1.ADKAgentConfig, server *v1
 		params.TlsInsecureSkipVerify = tlsInsecureSkipVerify(server.Spec.TLS)
 		config.HttpTools = append(config.HttpTools, &configv1.ADKHTTPMCPServerConfig{
 			Params: params, Tools: tools, RequireApproval: requireApproval,
+			TokenPassthrough: ptr.Deref(server.Spec.TokenPassthrough, false),
 		})
 	}
 
