@@ -59,6 +59,8 @@ func TestCLICommandsRetainBrowserOwnershipAcrossInvocations(t *testing.T) {
 			binding := adk.MCPCLIConfig{Name: "browser", HTTP: adk.HttpMcpServerConfig{Params: adk.StreamableHTTPConnectionParams{Url: remote.URL}, Tools: []string{"create", "read", "close"}}}
 			if protocol == "SSE" {
 				binding.SSE = &adk.SseMcpServerConfig{Params: adk.SseConnectionParams{Url: remote.URL}, Tools: binding.HTTP.Tools}
+				operationTimeout := .5
+				binding.SSE.Params.Timeout = &operationTimeout
 				binding.HTTP = adk.HttpMcpServerConfig{}
 			}
 			owner, cancel := context.WithCancel(t.Context())
@@ -74,11 +76,87 @@ func TestCLICommandsRetainBrowserOwnershipAcrossInvocations(t *testing.T) {
 				result, err := executor.ExecuteCommand(cliSessionContext{Context: t.Context(), id: "alice"}, fmt.Sprintf("%q --binding-file %q %s", binary, file, name), directory)
 				require.NoError(t, err, "%s", result)
 				require.Contains(t, result, "owned browser tab")
+				if protocol == "SSE" && name == "create" {
+					// A model may think longer than one operation's deadline between commands.
+					time.Sleep(800 * time.Millisecond)
+				}
 			}
 			mu.Lock()
 			defer mu.Unlock()
 			require.Empty(t, owners)
 		})
+	}
+}
+
+func TestRetainedSSECommandsKeepOperationDeadlines(t *testing.T) {
+	binary := filepath.Join(t.TempDir(), "mcp-cli")
+	output, err := exec.Command("go", "build", "-o", binary, "../../cmd/mcp-cli").CombinedOutput()
+	require.NoError(t, err, "%s", output)
+	var calls atomic.Int32
+	release := make(chan struct{})
+	server := mcpsdk.NewServer(&mcpsdk.Implementation{Name: "slow", Version: "1"}, nil)
+	server.AddTool(&mcpsdk.Tool{Name: "wait", InputSchema: json.RawMessage(`{"type":"object"}`)}, func(ctx context.Context, _ *mcpsdk.CallToolRequest) (*mcpsdk.CallToolResult, error) {
+		calls.Add(1)
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-release:
+			return &mcpsdk.CallToolResult{}, nil
+		}
+	})
+	remote := httptest.NewServer(mcpsdk.NewSSEHandler(func(*http.Request) *mcpsdk.Server { return server }, nil))
+	defer func() { close(release); remote.Close() }()
+	operationTimeout := .5
+	binding := adk.MCPCLIConfig{Name: "slow", SSE: &adk.SseMcpServerConfig{Params: adk.SseConnectionParams{Url: remote.URL, Timeout: &operationTimeout}, Tools: []string{"wait"}}}
+	data, err := json.Marshal(binding)
+	require.NoError(t, err)
+	directory := t.TempDir()
+	file := filepath.Join(directory, "binding.json")
+	require.NoError(t, os.WriteFile(file, data, 0600))
+	owner, stopOwner := context.WithCancel(t.Context())
+	defer stopOwner()
+	executor := tools.NewCommandExecutor(tools.ExecutionConfig{PrepareEnvironment: mcp.PrepareCLIEnvironment(owner, []adk.MCPCLIConfig{binding}, false, nil)})
+	command := fmt.Sprintf(`if %q --binding-file %q wait >result.json 2>diagnostic.txt; then exit 1; else cat diagnostic.txt; fi`, binary, file)
+	started := time.Now()
+	result, err := executor.ExecuteCommand(cliSessionContext{Context: t.Context(), id: "alice"}, command, directory)
+	require.NoError(t, err, "%s", result)
+	require.Contains(t, result, "context deadline exceeded")
+	require.Less(t, time.Since(started), 3*time.Second)
+	require.EqualValues(t, 1, calls.Load(), "a timed-out tool call must not be replayed")
+}
+
+func TestRetainedSSEInitializationKeepsOperationDeadline(t *testing.T) {
+	binary := filepath.Join(t.TempDir(), "mcp-cli")
+	output, err := exec.Command("go", "build", "-o", binary, "../../cmd/mcp-cli").CombinedOutput()
+	require.NoError(t, err, "%s", output)
+	finished := make(chan struct{})
+	remote := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
+		<-request.Context().Done()
+		close(finished)
+	}))
+	defer remote.Close()
+	operationTimeout := .5
+	binding := adk.MCPCLIConfig{Name: "silent", SSE: &adk.SseMcpServerConfig{Params: adk.SseConnectionParams{Url: remote.URL, Timeout: &operationTimeout}}}
+	data, err := json.Marshal(binding)
+	require.NoError(t, err)
+	directory := t.TempDir()
+	file := filepath.Join(directory, "binding.json")
+	require.NoError(t, os.WriteFile(file, data, 0600))
+	owner, stopOwner := context.WithCancel(t.Context())
+	defer stopOwner()
+	executor := tools.NewCommandExecutor(tools.ExecutionConfig{PrepareEnvironment: mcp.PrepareCLIEnvironment(owner, []adk.MCPCLIConfig{binding}, false, nil)})
+	invocation, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	command := fmt.Sprintf(`if %q --binding-file %q --help >result.json 2>diagnostic.txt; then exit 1; else cat diagnostic.txt; fi`, binary, file)
+	started := time.Now()
+	result, err := executor.ExecuteCommand(cliSessionContext{Context: invocation, id: "alice"}, command, directory)
+	require.NoError(t, err, "%s", result)
+	require.Contains(t, result, "deadline exceeded")
+	require.Less(t, time.Since(started), 2*time.Second)
+	select {
+	case <-finished:
+	case <-time.After(time.Second):
+		t.Fatal("timed-out initialization retained its SSE request")
 	}
 }
 
