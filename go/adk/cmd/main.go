@@ -17,6 +17,7 @@ import (
 	"github.com/kagent-dev/kagent/go/adk/pkg/auth"
 	"github.com/kagent-dev/kagent/go/adk/pkg/config"
 	"github.com/kagent-dev/kagent/go/adk/pkg/controllerclient"
+	"github.com/kagent-dev/kagent/go/adk/pkg/mcp"
 	kagentmemory "github.com/kagent-dev/kagent/go/adk/pkg/memory"
 	runnerpkg "github.com/kagent-dev/kagent/go/adk/pkg/runner"
 	"github.com/kagent-dev/kagent/go/adk/pkg/session"
@@ -157,7 +158,11 @@ func run(logLevel, host, port, configDir string) error {
 	}
 
 	ctx, cancelRuntime := context.WithCancel(logging.IntoContext(context.Background(), logger))
-	defer cancelRuntime()
+	ctx, shutdownMCP := mcp.WithClientLifecycleShutdown(ctx)
+	defer func() {
+		cancelRuntime()
+		shutdownMCP()
+	}()
 
 	// Build memory service if configured.
 	var memoryService *kagentmemory.KagentMemoryService

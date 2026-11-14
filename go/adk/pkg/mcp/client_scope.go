@@ -102,7 +102,7 @@ func (rt *headerRoundTripper) resolveStaticAuthorization() string {
 func (c *ClientLifecycle) relationship(key relationshipKey) (*clientRelationship, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.closed {
+	if c.closed || c.running.Err() != nil {
 		return nil, errors.New("MCP client lifecycle stopped")
 	}
 	if c.relationships == nil {

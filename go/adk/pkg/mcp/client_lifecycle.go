@@ -68,17 +68,40 @@ func NewClientLifecycle(host context.Context, provider LifecycleAuthorityProvide
 		running = WithResultTransformer(running, transform)
 	}
 	owner := &ClientLifecycle{provider: provider, running: running, stop: stop}
-	context.AfterFunc(host, func() {
-		for _, outcome := range owner.Close() {
-			logging.FromContext(host).InfoContext(host, "MCP termination outcome", "endpoint", outcome.Endpoint, "status", outcome.Status, "http_status", outcome.HTTPStatus)
+	var reported sync.Once
+	join := func(shutdown context.Context) {
+		reported.Do(func() {
+			for _, outcome := range owner.close(shutdown) {
+				logging.FromContext(host).InfoContext(host, "MCP termination outcome", "endpoint", outcome.Endpoint, "status", outcome.Status, "http_status", outcome.HTTPStatus)
+			}
+		})
+	}
+	standalone := func() {
+		shutdown, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer cancel()
+		join(shutdown)
+	}
+	if runtime, ok := host.Value(runtimeClientsKey{}).(*runtimeClients); ok {
+		if !runtime.register(runtimeClient{stop: stop, join: join}) {
+			stop()
+			standalone()
 		}
-	})
+		context.AfterFunc(host, runtime.close)
+	} else {
+		context.AfterFunc(host, standalone)
+	}
 	return owner
 }
 
 // Close releases all local connections concurrently within one total deadline.
 // Returned evidence describes HTTP responses, not deletion of domain resources.
 func (c *ClientLifecycle) Close() []TerminationOutcome {
+	shutdown, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+	return c.close(shutdown)
+}
+
+func (c *ClientLifecycle) close(shutdown context.Context) []TerminationOutcome {
 	c.once.Do(func() {
 		c.mu.Lock()
 		c.closed = true
@@ -89,8 +112,6 @@ func (c *ClientLifecycle) Close() []TerminationOutcome {
 		c.relationships = nil
 		c.mu.Unlock()
 		var wg sync.WaitGroup
-		shutdown, cancelShutdown := context.WithTimeout(context.Background(), shutdownTimeout)
-		defer cancelShutdown()
 		for _, owned := range connections {
 			owned.transport.mu.Lock()
 			owned.transport.shutdown = shutdown
@@ -126,7 +147,7 @@ func (c *ClientLifecycle) Close() []TerminationOutcome {
 func (c *ClientLifecycle) registerNative(closer io.Closer) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.closed {
+	if c.closed || c.running.Err() != nil {
 		return false
 	}
 	c.nativeClosers = append(c.nativeClosers, closer)
@@ -136,7 +157,7 @@ func (c *ClientLifecycle) registerNative(closer io.Closer) bool {
 func (c *ClientLifecycle) register(owned *ownedConnection) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.closed {
+	if c.closed || c.running.Err() != nil {
 		return false
 	}
 	c.connections = append(c.connections, owned)

@@ -358,3 +358,76 @@ func TestCLICommandPassthroughUsesCurrentCallerAndRejectsMissingToken(t *testing
 		mu.Unlock()
 	}
 }
+
+func TestRetainedCLIRefreshesModernCacheableCatalog(t *testing.T) {
+	binary := filepath.Join(t.TempDir(), "mcp-cli")
+	output, err := exec.Command("go", "build", "-o", binary, "../../cmd/mcp-cli").CombinedOutput()
+	require.NoError(t, err, "%s", output)
+	var initialized, catalogs, calls atomic.Int32
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		var request struct {
+			ID     json.RawMessage `json:"id"`
+			Method string          `json:"method"`
+			Params struct {
+				Arguments json.RawMessage `json:"arguments"`
+			} `json:"params"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Error(err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if len(request.ID) == 0 {
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+		var result string
+		switch request.Method {
+		case "server/discover":
+			initialized.Add(1)
+			result = `{"supportedVersions":["2026-07-28"],"capabilities":{"tools":{}}}`
+		case "tools/list":
+			version := catalogs.Add(1)
+			result = fmt.Sprintf(`{"ttlMs":60000,"cacheScope":"private","tools":[{"name":"record","inputSchema":{"type":"object","description":"catalog-%d","properties":{"count":{"type":"integer","enum":[9007199254740993]}},"required":["count"],"additionalProperties":false}}]}`, version)
+		case "tools/call":
+			calls.Add(1)
+			require.Contains(t, string(request.Params.Arguments), "9007199254740993")
+			result = `{"content":[],"structuredContent":{"count":9007199254740993}}`
+		default:
+			t.Errorf("unexpected method %q", request.Method)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%s,"result":%s}`, request.ID, result)
+	}))
+	defer remote.Close()
+	binding := adk.MCPCLIConfig{Name: "cacheable", HTTP: adk.HttpMcpServerConfig{Params: adk.StreamableHTTPConnectionParams{Url: remote.URL}}}
+	data, err := json.Marshal(binding)
+	require.NoError(t, err)
+	directory := t.TempDir()
+	file := filepath.Join(directory, "binding.json")
+	require.NoError(t, os.WriteFile(file, data, 0600))
+	executor := tools.NewCommandExecutor(tools.ExecutionConfig{PrepareEnvironment: mcp.PrepareCLIEnvironment(t.Context(), []adk.MCPCLIConfig{binding}, false, nil)})
+	base := fmt.Sprintf("%q --binding-file %q record", binary, file)
+	for version := 1; version <= 2; version++ {
+		result, err := executor.ExecuteCommand(cliSessionContext{Context: t.Context(), id: "alice"}, base+" --help schema", directory)
+		require.NoError(t, err, "%s", result)
+		require.Contains(t, result, fmt.Sprintf("catalog-%d", version))
+		require.Contains(t, result, "9007199254740993")
+	}
+	_, err = executor.ExecuteCommand(cliSessionContext{Context: t.Context(), id: "alice"}, base+" --count 9007199254740992", directory)
+	require.Error(t, err, "validation must retain the exact wire enum")
+	for range 2 {
+		result, err := executor.ExecuteCommand(cliSessionContext{Context: t.Context(), id: "alice"}, base+" --count 9007199254740993", directory)
+		require.NoError(t, err, "%s", result)
+		require.Contains(t, result, "9007199254740993")
+	}
+	require.EqualValues(t, 1, initialized.Load(), "refreshing catalogs must retain the negotiated SDK connection")
+	require.EqualValues(t, 5, catalogs.Load(), "each command must discover its current wire catalog")
+	require.EqualValues(t, 2, calls.Load(), "help and invalid arguments must not dispatch")
+}

@@ -215,6 +215,17 @@ func openCLISession(ctx context.Context, binding cliBinding, headers *cliCommand
 	httpClient.Transport = managed
 	remoteSession.managed = managed
 	client := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "kagent-mcp-cli", Version: "1"}, &mcpsdk.ClientOptions{Capabilities: &mcpsdk.ClientCapabilities{}, MultiRoundTrip: &mcpsdk.MultiRoundTripOptions{Disabled: true}})
+	// Each command validates the current wire schema, preserving exact JSON
+	// numbers. SDK catalog cache hits would bypass that per-command capture.
+	client.AddSendingMiddleware(func(next mcpsdk.MethodHandler) mcpsdk.MethodHandler {
+		return func(ctx context.Context, method string, request mcpsdk.Request) (mcpsdk.Result, error) {
+			result, err := next(ctx, method, request)
+			if catalog, ok := result.(*mcpsdk.ListToolsResult); ok && err == nil {
+				catalog.TTLMs = 0
+			}
+			return result, err
+		}
+	})
 	if headers != nil {
 		transport = &registeredTransport{inner: transport, owner: headers.lifecycle, managed: managed, pool: pool, cancel: cancel}
 	}
