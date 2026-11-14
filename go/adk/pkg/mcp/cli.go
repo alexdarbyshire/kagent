@@ -186,6 +186,11 @@ func openCLISession(ctx context.Context, binding cliBinding, headers *cliCommand
 		httpClient = remote.HTTPClient
 	case *mcpsdk.SSEClientTransport:
 		httpClient = remote.HTTPClient
+		if headers != nil && params.SseReadTimeout == nil {
+			// The retained GET outlives individual commands. Command contexts
+			// still enforce deadlines; an explicit SSE read timeout is preserved.
+			httpClient.Timeout = 0
+		}
 	}
 	httpClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	invocation := httpClient.Transport
@@ -214,6 +219,12 @@ func openCLISession(ctx context.Context, binding cliBinding, headers *cliCommand
 	}
 	httpClient.Transport = managed
 	remoteSession.managed = managed
+	var initializationTimer *time.Timer
+	if headers != nil && binding.SSE != nil {
+		// Bound connection setup without retaining its deadline on the GET stream.
+		initializationTimer = time.AfterFunc(timeout, cancel)
+		defer initializationTimer.Stop()
+	}
 	client := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "kagent-mcp-cli", Version: "1"}, &mcpsdk.ClientOptions{Capabilities: &mcpsdk.ClientCapabilities{}, MultiRoundTrip: &mcpsdk.MultiRoundTripOptions{Disabled: true}})
 	// Each command validates the current wire schema, preserving exact JSON
 	// numbers. SDK catalog cache hits would bypass that per-command capture.
@@ -230,11 +241,14 @@ func openCLISession(ctx context.Context, binding cliBinding, headers *cliCommand
 		transport = &registeredTransport{inner: transport, owner: headers.lifecycle, managed: managed, pool: pool, cancel: cancel}
 	}
 	session, err := client.Connect(ctx, transport, nil)
+	remoteSession.session, remoteSession.lifecycle = session, lifecycle
+	if initializationTimer != nil && !initializationTimer.Stop() {
+		err = errors.Join(err, context.DeadlineExceeded)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect MCP command %s: %w", binding.Name, lifecycle.connectionError(err))
 	}
 
-	remoteSession.session, remoteSession.lifecycle = session, lifecycle
 	return remoteSession, nil
 }
 
@@ -246,7 +260,7 @@ func runCLICommand(ctx context.Context, binding cliBinding, request cliCommandRe
 	var tools []*mcpsdk.Tool
 	for tool, err := range session.Tools(ctx, nil) {
 		if err != nil {
-			return cliFailure{Err: fmt.Errorf("failed to discover MCP tools: %w", lifecycle.connectionError(err))}
+			return cliFailure{Err: fmt.Errorf("failed to discover MCP tools for %s (tool call not dispatched): %w", binding.Name, lifecycle.connectionError(err))}
 		}
 		if len(selectedTools) == 0 || slices.Contains(selectedTools, tool.Name) {
 			tools = append(tools, tool)
@@ -286,7 +300,7 @@ func runCLICommand(ctx context.Context, binding cliBinding, request cliCommandRe
 	}
 	result, err := session.CallTool(ctx, &mcpsdk.CallToolParams{Name: plan.tool, Arguments: arguments})
 	if err != nil {
-		return cliFailure{Err: fmt.Errorf("failed to call MCP %s %s (not retried): %w", binding.Name, selected.Name, lifecycle.connectionError(err))}
+		return cliFailure{Err: fmt.Errorf("failed to call MCP %s %s (not retried; acceptance is unknown; do not repeat an ambiguous action): %w", binding.Name, selected.Name, lifecycle.connectionError(err))}
 	}
 	resultData, err := lifecycle.resultJSON()
 	if err != nil {
