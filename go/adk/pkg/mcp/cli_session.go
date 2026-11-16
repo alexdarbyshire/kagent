@@ -13,6 +13,7 @@ import (
 	"os"
 	"sync"
 
+	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"go.opentelemetry.io/otel/propagation"
 
 	"github.com/kagent-dev/kagent/go/api/adk"
@@ -113,6 +114,12 @@ func (c *cliCommandRuntime) run(ctx, invocation context.Context, name string, re
 	}
 	session.headers.bind(invocation)
 	defer session.headers.release()
+	if session.command != nil && session.command.isClosed() {
+		err := session.command.Close()
+		session.command = nil
+		loss := errors.New("MCP relationship state lost; prior remote state is unavailable and prior resource cleanup is unconfirmed; command not dispatched; previous operation not replayed; a subsequent deliberate command can establish a fresh relationship")
+		return cliResponse(cliFailure{Err: errors.Join(loss, err)})
+	}
 	if session.command == nil {
 		// Cancel incomplete initialization with this call, then detach the healthy
 		// connection from the invocation without retaining its context.
@@ -133,7 +140,7 @@ func (c *cliCommandRuntime) run(ctx, invocation context.Context, name string, re
 		session.command.lifecycle.reset()
 		outcome = runCLICommand(context.WithValue(context.WithValue(ctx, operationKey{}, &clientOperation{}), cliCommandContextKey{}, invocation), binding, request, session.command)
 	}
-	if err := cliOutcomeError(outcome); err != nil && session.command != nil && session.command.managed.stateLost() {
+	if err := cliOutcomeError(outcome); err != nil && session.command != nil && (session.command.managed.stateLost() || errors.Is(err, mcpsdk.ErrConnectionClosed)) {
 		failure := fmt.Errorf("MCP relationship state lost; operation not replayed: %w", errors.Join(err, session.command.Close()))
 		session.command = nil
 		if result, ok := outcome.(cliResult); ok {
