@@ -117,9 +117,8 @@ func (c *cliCommandRuntime) run(ctx, invocation context.Context, name string, re
 	if session.command != nil && session.command.isClosed() {
 		err := session.command.Close()
 		session.command = nil
-		if err != nil {
-			return cliResponse(cliFailure{Err: fmt.Errorf("failed to release closed MCP relationship; command not dispatched: %w", err)})
-		}
+		loss := errors.New("MCP relationship state lost; prior remote state is unavailable and prior resource cleanup is unconfirmed; command not dispatched; previous operation not replayed; a subsequent deliberate command can establish a fresh relationship")
+		return cliResponse(cliFailure{Err: errors.Join(loss, err)})
 	}
 	if session.command == nil {
 		// Cancel incomplete initialization with this call, then detach the healthy
