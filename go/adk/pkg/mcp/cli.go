@@ -104,6 +104,7 @@ type cliRemoteSession struct {
 	cancel    context.CancelFunc
 	timeout   time.Duration
 	managed   *managedHTTPTransport
+	closed    chan struct{}
 }
 
 func (c *cliRemoteSession) Close() error {
@@ -248,8 +249,23 @@ func openCLISession(ctx context.Context, binding cliBinding, headers *cliCommand
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect MCP command %s: %w", binding.Name, lifecycle.connectionError(err))
 	}
+	remoteSession.closed = make(chan struct{})
+	go func() {
+		// Wait observes SDK termination; it never sends or retries an operation.
+		_ = session.Wait()
+		close(remoteSession.closed)
+	}()
 
 	return remoteSession, nil
+}
+
+func (c *cliRemoteSession) isClosed() bool {
+	select {
+	case <-c.closed:
+		return true
+	default:
+		return false
+	}
 }
 
 func runCLICommand(ctx context.Context, binding cliBinding, request cliCommandRequest, remote *cliRemoteSession) cliOutcome {
